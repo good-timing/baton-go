@@ -17,6 +17,13 @@ func installWithSink(t *testing.T, cfg Config, register func(*mcp.Server)) (*mcp
 	t.Helper()
 	server := newVectorServer()
 	register(server)
+	return server, installOn(t, server, cfg)
+}
+
+// installOn installs Baton on server with a memory sink, VendorID "acme"
+// unless cfg names one.
+func installOn(t *testing.T, server *mcp.Server, cfg Config) *memorySink {
+	t.Helper()
 	sink := &memorySink{}
 	cfg.sink = sink
 	if cfg.VendorID == "" {
@@ -25,7 +32,20 @@ func installWithSink(t *testing.T, cfg Config, register func(*mcp.Server)) (*mcp
 	if _, err := Install(server, cfg); err != nil {
 		t.Fatal(err)
 	}
-	return server, sink
+	return sink
+}
+
+// serveHTTP serves server over streamable HTTP, or SSE, and returns the URL.
+func serveHTTP(t *testing.T, server *mcp.Server, sse bool, opts *mcp.StreamableHTTPOptions) string {
+	t.Helper()
+	get := func(*http.Request) *mcp.Server { return server }
+	var handler http.Handler = mcp.NewStreamableHTTPHandler(get, opts)
+	if sse {
+		handler = mcp.NewSSEHandler(get, nil)
+	}
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+	return ts.URL
 }
 
 func connectOver(t *testing.T, transport mcp.Transport) *mcp.ClientSession {
@@ -105,9 +125,7 @@ func TestUserGoalNeverReachesTheVendor(t *testing.T) {
 func TestInstructionsGoAfterTheVendors(t *testing.T) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "acme"}, &mcp.ServerOptions{Instructions: "Vendor text."})
 	addLookup(server)
-	if _, err := Install(server, Config{VendorID: "acme", ReportMode: "on", sink: &memorySink{}}); err != nil {
-		t.Fatal(err)
-	}
+	installOn(t, server, Config{ReportMode: "on"})
 	cs := connect(t, server)
 	got := cs.InitializeResult().Instructions
 	want := "Vendor text.\n\nUse `acme_annotate` to report a acme tool call that went wrong, or a request no tool covers; its description says when and how." + instructionsSubagentClause
@@ -130,13 +148,8 @@ func TestStatelessHTTP(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			server := mcp.NewServer(&mcp.Implementation{Name: "spec-vector-generator"}, &mcp.ServerOptions{GetSessionID: c.getSessionID})
 			addLookup(server)
-			sink := &memorySink{}
-			if _, err := Install(server, Config{VendorID: "acme", ReportMode: "on", sink: sink}); err != nil {
-				t.Fatal(err)
-			}
-			ts := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true}))
-			t.Cleanup(ts.Close)
-			cs := connectOver(t, &mcp.StreamableClientTransport{Endpoint: ts.URL})
+			sink := installOn(t, server, Config{ReportMode: "on"})
+			cs := connectOver(t, &mcp.StreamableClientTransport{Endpoint: serveHTTP(t, server, false, &mcp.StreamableHTTPOptions{Stateless: true})})
 
 			tools, err := cs.ListTools(context.Background(), nil)
 			if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
 )
@@ -29,16 +30,29 @@ type Organization struct {
 // is nil when the transport carries none. Return nil for "no one".
 type ResolvePrincipal func(ctx context.Context, token *auth.TokenInfo) (*Principal, error)
 
+const identityCap = 128
+
+// usableIdentityText is SPEC §11.4's test: not blank, well-formed, no U+0000.
+func usableIdentityText(s string) bool {
+	return strings.TrimSpace(s) != "" && utf8.ValidString(s) && !strings.ContainsRune(s, 0)
+}
+
+// wireIdentity sends id as the resolver returned it, cut at identityCap code
+// points as the reference producers do; an unusable id gives no identity, and
+// a display name past the cap is dropped (SPEC §11.4).
 func wireIdentity(id, displayName string, hashed bool) *identityWire {
-	if strings.TrimSpace(id) == "" {
+	if !usableIdentityText(id) {
 		return nil
+	}
+	if utf8.RuneCountInString(id) > identityCap {
+		id = string([]rune(id)[:identityCap])
 	}
 	form := "raw"
 	if hashed {
 		form = "hashed"
 	}
 	w := &identityWire{ID: id, Source: "asserted", Form: form}
-	if strings.TrimSpace(displayName) != "" {
+	if usableIdentityText(displayName) && utf8.RuneCountInString(displayName) <= identityCap {
 		w.DisplayName = &displayName
 	}
 	return w

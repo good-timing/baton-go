@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -30,64 +31,89 @@ func uuid7() string {
 	return string(out[:])
 }
 
+var (
+	transportHTTP   = "http"
+	transportNoHTTP = "no-http-request"
+)
+
 type callSession struct {
 	id     string
 	origin string // "observed" or "minted"
+	// transport is transport_observed: nil when the producer cannot tell.
+	transport *string
 }
 
-// sessions resolves SPEC §3.4's ladder as far as go-sdk shows it: the
-// Mcp-Session-Id header (rung 4), else an id minted per go-sdk connection.
-// That is one per process on stdio, one per client on SSE, which passes no
-// headers, and one per request on stateless HTTP (rung 5). The header is read
-// directly because ServerSession.ID cannot tell an id the client sent from
-// one go-sdk made up. Weak keys let a closed connection be collected.
+// perRequest is SPEC §3.4 rung 5's per-call session: minted under HTTP.
+func (c callSession) perRequest() bool {
+	return c.origin == "minted" && c.transport == &transportHTTP
+}
+
+func mintSessionID() string { return "sdk-" + uuid7() }
+
+// sessions resolves SPEC §3.4's ladder as far as go-sdk shows it:
+//   - the Mcp-Session-Id header (rung 4);
+//   - else, under HTTP, a new id per request (rung 5);
+//   - else, with no HTTP request (stdio, in-memory), the process-wide id, which
+//     the surface_snapshot shares, as in baton-sdk;
+//   - else (SSE, which passes no headers) an id per go-sdk connection.
+//
+// The header is read directly because ServerSession.ID cannot tell an id the
+// client sent from one go-sdk made up. Weak keys let a closed connection be
+// collected.
 type sessions struct {
 	fallback string
-	minted   *lru[weak.Pointer[mcp.ServerSession], string]
-	// The first connection takes the process-wide id, so a stdio server's
-	// calls share one session with its surface_snapshot, as in baton-sdk.
-	fallbackTaken bool
+	// ioConnType is go-sdk's unexported stdio and in-memory connection type,
+	// taken from the probe's connection; nil if the probe failed.
+	ioConnType reflect.Type
+	minted     *lru[weak.Pointer[mcp.ServerSession], string]
 }
 
 const sessionCap = 4096
 
 func newSessions() *sessions {
-	return &sessions{fallback: "sdk-" + uuid7(), minted: newLRU[weak.Pointer[mcp.ServerSession], string](sessionCap)}
+	return &sessions{fallback: mintSessionID(), minted: newLRU[weak.Pointer[mcp.ServerSession], string](sessionCap)}
 }
 
 func (s *sessions) resolve(conn *mcp.ServerSession, header http.Header) callSession {
-	if id := strings.TrimSpace(header.Get("Mcp-Session-Id")); id != "" {
-		return callSession{id: id, origin: "observed"}
+	if header != nil {
+		if id := strings.TrimSpace(header.Get("Mcp-Session-Id")); id != "" {
+			return callSession{id: id, origin: "observed", transport: &transportHTTP}
+		}
+		return callSession{id: mintSessionID(), origin: "minted", transport: &transportHTTP}
 	}
 	if conn == nil {
-		return callSession{id: s.fallback, origin: "minted"}
+		return s.process()
 	}
-	id := s.minted.getOrPut(weak.Make(conn), func() string {
-		if !s.fallbackTaken {
-			s.fallbackTaken = true
-			return s.fallback
-		}
-		return "sdk-" + uuid7()
-	})
-	return callSession{id: id, origin: "minted"}
+	if s.ioConnType != nil && connType(conn) == s.ioConnType {
+		return callSession{id: s.fallback, origin: "minted", transport: &transportNoHTTP}
+	}
+	return callSession{id: s.minted.getOrPut(weak.Make(conn), mintSessionID), origin: "minted"}
 }
 
+// process is the process-wide session, for events that belong to no caller.
 func (s *sessions) process() callSession {
 	return callSession{id: s.fallback, origin: "minted"}
 }
 
-func transportObserved(header http.Header) *string {
-	if header != nil {
-		return ptr("http")
+// connType is the dynamic type of the session's connection. go-sdk does not
+// export it, so it is read by reflection; a renamed field gives nil, and the
+// transport is then reported as unknown.
+func connType(conn *mcp.ServerSession) reflect.Type {
+	field := reflect.ValueOf(conn).Elem().FieldByName("mcpConn")
+	if !field.IsValid() || field.IsNil() {
+		return nil
 	}
-	return nil
+	return field.Elem().Type()
 }
 
 // sequencer numbers each session's events from 1 (SPEC §11.2 rule 3). An
 // observed id can span processes, so its number is also at least the time in
-// microseconds.
+// microseconds; a per-request session is numbered by the clock alone (SPEC
+// §3.4 rung 5), so it keeps no entry.
 type sequencer struct {
 	counts *lru[string, int64]
+	mu     sync.Mutex
+	clock  int64
 }
 
 func newSequencer() *sequencer {
@@ -95,6 +121,12 @@ func newSequencer() *sequencer {
 }
 
 func (s *sequencer) next(sess callSession) int64 {
+	if sess.perRequest() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.clock = max(s.clock+1, time.Now().UnixMicro())
+		return s.clock
+	}
 	return s.counts.update(sess.id, func(prev int64) int64 {
 		n := prev + 1
 		if sess.origin == "observed" {
@@ -134,6 +166,16 @@ func (l *lru[K, V]) getOrPut(key K, create func() V) V {
 		}
 		return create()
 	})
+}
+
+// add reports whether key was absent, and adds it.
+func (l *lru[K, V]) add(key K) bool {
+	added := false
+	l.with(key, func(prev V, found bool) V {
+		added = !found
+		return prev
+	})
+	return added
 }
 
 func (l *lru[K, V]) with(key K, f func(prev V, found bool) V) V {

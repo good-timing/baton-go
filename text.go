@@ -56,17 +56,6 @@ func reportPointer(displayName, annotateName string) (string, error) {
 	return pointer, nil
 }
 
-// ourInstructions is Baton's paragraph: the report pointer when Baton serves
-// the report tool, then the subagent sentence unless a tool declares its own
-// user_goal, where the sentence would send the turn number into the vendor's
-// argument.
-func ourInstructions(pointer string, vendorDeclaresUserGoal bool) string {
-	if vendorDeclaresUserGoal {
-		return pointer
-	}
-	return strings.TrimSpace(pointer + instructionsSubagentClause)
-}
-
 // withVendorInstructions puts the vendor's own text first (SPEC §5.1.2): the
 // runtime cuts from the end, so ours is what is lost.
 func withVendorInstructions(vendor, ours string) string {

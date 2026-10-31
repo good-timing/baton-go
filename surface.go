@@ -11,11 +11,10 @@ const sentSurfacesCap = 256
 // The hash covers the vendor's own surface only, never Baton's
 // additions, so changing a Baton setting does not look like a new surface.
 func (b *installed) maybeSnapshot(l listing) {
-	tools := l.tools
-	if b.lastSurface.unchanged(tools) {
+	if b.lastSurface.unchanged(l) {
 		return
 	}
-	toolMaps := sortedToolMaps(tools)
+	toolMaps := b.sortedToolMaps(l)
 	canonical, err := json.Marshal(map[string]any{
 		"server_info":  b.server.serverInfo,
 		"capabilities": b.server.capabilities,
@@ -27,12 +26,7 @@ func (b *installed) maybeSnapshot(l listing) {
 	}
 	sum := sha256.Sum256(canonical)
 	digest := "sha256:" + hex.EncodeToString(sum[:])
-	isNew := false
-	b.sentSurfaces.with(digest, func(_ struct{}, found bool) struct{} {
-		isNew = !found
-		return struct{}{}
-	})
-	if !isNew {
+	if !b.sentSurfaces.add(digest) {
 		return
 	}
 	injected := []string{}

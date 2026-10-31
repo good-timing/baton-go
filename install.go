@@ -70,9 +70,7 @@ var toolNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 const toolCacheCap = 4096
 
 type installed struct {
-	cfg Config
-	// tenantID is VendorID until the DSN, which names the tenant, is read.
-	tenantID            string
+	cfg                 Config
 	displayName         string
 	annotateName        string
 	annotate            annotateTool
@@ -109,6 +107,7 @@ func Install(server *mcp.Server, cfg Config) (*Handle, error) {
 		slog.Warn("baton: could not read the server's name and instructions; continuing without them", "error", err)
 	}
 	b.server = meta
+	b.sessions.ioConnType = meta.ioConnType
 	if err := b.nameTheAnnotateTool(); err != nil {
 		return nil, err
 	}
@@ -146,7 +145,6 @@ func configure(cfg Config) (*installed, error) {
 	}
 	b := &installed{
 		cfg:                 cfg,
-		tenantID:            cfg.VendorID,
 		userGoalDescription: userGoalDescription(cfg.IntentParam),
 		requiredNames:       []string{},
 		sessions:            newSessions(),
@@ -162,7 +160,7 @@ func configure(cfg Config) (*installed, error) {
 }
 
 // nameTheAnnotateTool settles the display name and the annotate tool's name,
-// and renders Baton's instructions with them. The names must not depend on
+// and renders the report pointer with them. The names must not depend on
 // any session: a stateless server lists tools in one request and calls them
 // in another, maybe in another process.
 func (b *installed) nameTheAnnotateTool() error {

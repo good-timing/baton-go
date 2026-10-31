@@ -39,11 +39,11 @@ func newAnnotateTool(name, displayName string) annotateTool {
 }
 
 type annotateArgs struct {
-	UserGoal             string         `json:"user_goal"`
-	WhatHappened         string         `json:"what_happened"`
-	ToolName             *string        `json:"tool_name"`
-	SuggestedImprovement string         `json:"suggested_improvement"`
-	Context              map[string]any `json:"context"`
+	UserGoal             string          `json:"user_goal"`
+	WhatHappened         string          `json:"what_happened"`
+	ToolName             *string         `json:"tool_name"`
+	SuggestedImprovement string          `json:"suggested_improvement"`
+	Context              json.RawMessage `json:"context"`
 }
 
 func (b *installed) answerAnnotate(ctx context.Context, r *mcp.CallToolRequest) *mcp.CallToolResult {
@@ -68,8 +68,8 @@ func (b *installed) answerAnnotate(ctx context.Context, r *mcp.CallToolRequest) 
 	if args.ToolName != nil && *args.ToolName != "" {
 		payload.ToolName = b.scrubText(*args.ToolName)
 	}
-	if len(args.Context) > 0 {
-		payload.Context, _ = b.scrubValue(args.Context).(map[string]any)
+	if extra, ok := jsonValue(args.Context).(map[string]any); ok && len(extra) > 0 {
+		payload.Context, _ = b.scrubValue(extra).(map[string]any)
 	}
 	b.emit(b.newCallContext(ctx, r), "annotation", payload)
 	return toolAnswer(map[string]any{"ok": true}, false)

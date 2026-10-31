@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -13,6 +14,7 @@ import (
 
 // serverMeta is the vendor's own initialize answer, before Baton adds to it.
 type serverMeta struct {
+	ioConnType   reflect.Type
 	name         string
 	serverInfo   any
 	capabilities any
@@ -25,7 +27,7 @@ type serverMeta struct {
 // client. It sends no "initialized" notice, so the vendor's
 // InitializedHandler does not run.
 func probeServer(server *mcp.Server) (serverMeta, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	clientSide, serverSide := mcp.NewInMemoryTransports()
 	session, err := server.Connect(ctx, serverSide, nil)
@@ -33,6 +35,7 @@ func probeServer(server *mcp.Server) (serverMeta, error) {
 		return serverMeta{}, err
 	}
 	defer session.Close()
+	ioConnType := connType(session)
 	conn, err := clientSide.Connect(ctx)
 	if err != nil {
 		return serverMeta{}, err
@@ -58,16 +61,17 @@ func probeServer(server *mcp.Server) (serverMeta, error) {
 			continue
 		}
 		if resp.Error != nil {
-			return serverMeta{}, resp.Error
+			return serverMeta{ioConnType: ioConnType}, resp.Error
 		}
 		var result mcp.InitializeResult
 		if err := json.Unmarshal(resp.Result, &result); err != nil {
-			return serverMeta{}, err
+			return serverMeta{ioConnType: ioConnType}, err
 		}
 		if result.ServerInfo == nil {
-			return serverMeta{}, errors.New("initialize answered with no serverInfo")
+			return serverMeta{ioConnType: ioConnType}, errors.New("initialize answered with no serverInfo")
 		}
 		return serverMeta{
+			ioConnType:   ioConnType,
 			name:         result.ServerInfo.Name,
 			serverInfo:   jsonValue(result.ServerInfo),
 			capabilities: jsonValue(result.Capabilities),

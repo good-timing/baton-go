@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -23,7 +23,11 @@ func (b *installed) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 		case "initialize":
 			res, err := next(ctx, method, req)
 			if r, ok := res.(*mcp.InitializeResult); ok && err == nil {
-				guard("instructions", func() { b.addInstructions(r, b.vendorTools(ctx, next, req)) })
+				guard("instructions", func() {
+					if l, ok := b.vendorTools(ctx, next, req); ok {
+						b.addInstructions(r, l)
+					}
+				})
 			}
 			return res, err
 		case "tools/list":
@@ -55,51 +59,53 @@ func guard(what string, f func()) {
 	f()
 }
 
-// vendorTool is a tool as listed, with its input schema as plain JSON data.
-// The schema is shared through the cache: read it, never edit it.
-type vendorTool struct {
-	tool   *mcp.Tool
-	schema map[string]any
-}
+// listing is the vendor's tools as one request sees them.
+type listing []*mcp.Tool
 
-func (t vendorTool) declares(param string) bool {
-	props, _ := t.schema["properties"].(map[string]any)
-	_, ok := props[param]
-	return ok
-}
-
-func anyDeclaresUserGoal(tools []vendorTool) bool {
-	return slices.ContainsFunc(tools, func(t vendorTool) bool { return t.declares(userGoalParam) })
-}
-
-func findTool(tools []vendorTool, name string) *vendorTool {
-	if i := slices.IndexFunc(tools, func(t vendorTool) bool { return t.tool.Name == name }); i >= 0 {
-		return &tools[i]
+func (l listing) find(name string) *mcp.Tool {
+	if i := slices.IndexFunc(l, func(t *mcp.Tool) bool { return t.Name == name }); i >= 0 {
+		return l[i]
 	}
 	return nil
 }
 
-// listing is the vendor's tools as one request sees them. ok is false when
-// the listing failed, and then nothing is concluded from it.
-type listing struct {
-	tools []vendorTool
-	ok    bool
+// schema is t's input schema as plain JSON data, cached per tool. It is
+// shared: read it, never edit it.
+func (b *installed) schema(t *mcp.Tool) map[string]any {
+	return b.schemas.getOrPut(t, func() map[string]any {
+		s, _ := jsonValue(t.InputSchema).(map[string]any)
+		return s
+	})
 }
 
+func (b *installed) declares(t *mcp.Tool, param string) bool {
+	props, _ := b.schema(t)["properties"].(map[string]any)
+	_, ok := props[param]
+	return ok
+}
+
+func (b *installed) anyDeclaresUserGoal(l listing) bool {
+	return slices.ContainsFunc(l, func(t *mcp.Tool) bool { return b.declares(t, userGoalParam) })
+}
+
+// ourInstructions is Baton's paragraph: the report pointer when Baton serves
+// the report tool, then the subagent sentence unless a tool declares its own
+// user_goal, where the sentence would send the turn number into the vendor's
+// argument.
 func (b *installed) ourInstructions(l listing) string {
 	pointer := ""
 	if b.servesAnnotate(l) {
 		pointer = b.reportPointer
 	}
-	return ourInstructions(pointer, anyDeclaresUserGoal(l.tools))
+	if b.anyDeclaresUserGoal(l) {
+		return pointer
+	}
+	return strings.TrimSpace(pointer + instructionsSubagentClause)
 }
 
 // addInstructions puts Baton's paragraph after the vendor's own text in this
 // response (SPEC §5.1.2).
 func (b *installed) addInstructions(r *mcp.InitializeResult, l listing) {
-	if !l.ok {
-		return
-	}
 	ours := b.ourInstructions(l)
 	if ours == "" {
 		return
@@ -117,44 +123,33 @@ func (b *installed) addInstructions(r *mcp.InitializeResult, l listing) {
 // Baton's additions. Listed per call rather than kept: tools can be added at
 // any time, and on a stateless server no earlier tools/list reached this
 // process. The request's own Extra goes along, so vendor middleware that
-// checks auth sees the same caller.
-func (b *installed) vendorTools(ctx context.Context, next mcp.MethodHandler, req mcp.Request) listing {
+// checks auth sees the same caller. ok is false when the listing failed,
+// which may be the vendor's auth refusing the caller; nothing is concluded from it.
+func (b *installed) vendorTools(ctx context.Context, next mcp.MethodHandler, req mcp.Request) (l listing, ok bool) {
 	ss, _ := req.GetSession().(*mcp.ServerSession)
-	var tools []vendorTool
 	cursor := ""
 	for range 1000 {
 		res, err := next(ctx, "tools/list", &mcp.ListToolsRequest{Session: ss, Extra: req.GetExtra(), Params: &mcp.ListToolsParams{Cursor: cursor}})
-		page, ok := res.(*mcp.ListToolsResult)
-		if err != nil || !ok {
-			return listing{}
+		page, isList := res.(*mcp.ListToolsResult)
+		if err != nil || !isList {
+			return nil, false
 		}
-		for _, t := range page.Tools {
-			tools = append(tools, b.withSchema(t))
-		}
+		l = append(l, page.Tools...)
 		if page.NextCursor == "" {
-			return listing{tools: tools, ok: true}
+			return l, true
 		}
 		cursor = page.NextCursor
 	}
-	return listing{}
+	return nil, false
 }
 
-func (b *installed) withSchema(t *mcp.Tool) vendorTool {
-	schema := b.schemas.getOrPut(t, func() map[string]any {
-		s, _ := jsonValue(t.InputSchema).(map[string]any)
-		return s
-	})
-	return vendorTool{tool: t, schema: schema}
-}
-
-// servesAnnotate is false when the listing failed, which may be the
-// vendor's auth refusing the caller, and when a vendor tool has the annotate
-// tool's name, which wins over Baton's.
+// servesAnnotate is false when a vendor tool has the annotate tool's name,
+// which wins over Baton's.
 func (b *installed) servesAnnotate(l listing) bool {
-	if b.annotateName == "" || !l.ok {
+	if b.annotateName == "" {
 		return false
 	}
-	if findTool(l.tools, b.annotateName) != nil {
+	if l.find(b.annotateName) != nil {
 		b.clashWarned.Do(func() {
 			slog.Warn("baton: a tool of yours has the annotation tool's name, so Baton's is not served; set Config.AnnotationToolName",
 				"name", b.annotateName)
@@ -175,16 +170,12 @@ func (b *installed) augmentToolList(ctx context.Context, next mcp.MethodHandler,
 	if r.NextCursor != "" || b.annotateName == "" {
 		return &out
 	}
-	l := listing{ok: true}
+	// A first page with no next page is the whole list.
+	l, ok := listing(r.Tools), true
 	if params, _ := req.GetParams().(*mcp.ListToolsParams); params != nil && params.Cursor != "" {
-		l = b.vendorTools(ctx, next, req)
-	} else {
-		// A first page with no next page is the whole list.
-		for _, t := range r.Tools {
-			l.tools = append(l.tools, b.withSchema(t))
-		}
+		l, ok = b.vendorTools(ctx, next, req)
 	}
-	if b.servesAnnotate(l) {
+	if ok && b.servesAnnotate(l) {
 		out.Tools = append(out.Tools, b.annotate.tool)
 	}
 	return &out
@@ -223,7 +214,6 @@ func (b *installed) withUserGoal(t *mcp.Tool) *mcp.Tool {
 
 type callContext struct {
 	session     callSession
-	transport   *string
 	callID      string
 	principal   *identityWire
 	org         *identityWire
@@ -237,8 +227,7 @@ func (b *installed) newCallContext(ctx context.Context, r *mcp.CallToolRequest) 
 		header, token = r.Extra.Header, r.Extra.TokenInfo
 	}
 	cc := callContext{
-		session:   b.sessions.resolve(r.Session, header),
-		transport: transportObserved(header),
+		session: b.sessions.resolve(r.Session, header),
 	}
 	cc.principal, cc.org = resolveCaller(ctx, b.cfg.ResolvePrincipal, token)
 	if len(r.Params.Meta) > 0 {
@@ -252,10 +241,13 @@ func (b *installed) newCallContext(ctx context.Context, r *mcp.CallToolRequest) 
 }
 
 func (b *installed) toolCall(ctx context.Context, next mcp.MethodHandler, method string, r *mcp.CallToolRequest) (mcp.Result, error) {
-	var l listing
-	guard("tools", func() { l = b.vendorTools(ctx, next, r) })
+	var (
+		l      listing
+		listed bool
+	)
+	guard("tools", func() { l, listed = b.vendorTools(ctx, next, r) })
 
-	if r.Params.Name == b.annotateName && b.servesAnnotate(l) {
+	if listed && r.Params.Name == b.annotateName && b.servesAnnotate(l) {
 		var res mcp.Result
 		guard("annotate", func() { res = b.answerAnnotate(ctx, r) })
 		if res != nil {
@@ -267,14 +259,14 @@ func (b *installed) toolCall(ctx context.Context, next mcp.MethodHandler, method
 		cc      callContext
 		started bool
 	)
-	tool := findTool(l.tools, r.Params.Name)
+	tool := l.find(r.Params.Name)
 	// With no listing, a tool is not assumed missing.
-	known := tool != nil || !l.ok
+	known := tool != nil || !listed
 	guard("tool_call_start", func() {
 		params, goal := b.stripGoalParams(r, tool)
 		cc = b.newCallContext(ctx, r)
 		cc.callID = uuid7()
-		if l.ok {
+		if listed {
 			b.maybeSnapshot(l)
 		}
 		start := toolCallStart{ToolName: r.Params.Name, Params: b.scrubValue(params), CallIntent: b.scrubOptional(goal)}
@@ -305,7 +297,7 @@ var (
 // §5.1.2), except a name the tool declares itself. Other values pass through
 // as the client wrote them, so a large integer is not rounded through a
 // float. It returns the arguments the vendor receives, and the goal.
-func (b *installed) stripGoalParams(r *mcp.CallToolRequest, tool *vendorTool) (any, string) {
+func (b *installed) stripGoalParams(r *mcp.CallToolRequest, tool *mcp.Tool) (any, string) {
 	var args map[string]json.RawMessage
 	if len(r.Params.Arguments) == 0 || json.Unmarshal(r.Params.Arguments, &args) != nil || args == nil {
 		return jsonValue(r.Params.Arguments), ""
@@ -318,7 +310,7 @@ func (b *installed) stripGoalParams(r *mcp.CallToolRequest, tool *vendorTool) (a
 	goal := ""
 	for _, name := range names {
 		raw, present := args[name]
-		if !present || (tool != nil && tool.declares(name)) {
+		if !present || (tool != nil && b.declares(tool, name)) {
 			continue
 		}
 		delete(args, name)
@@ -366,7 +358,7 @@ func (b *installed) emitOutcome(cc callContext, toolName string, known bool, res
 		failure.Result = b.scrubValue(jsonValue(result))
 	}
 	if raised != nil {
-		failure.ErrorType = fmt.Sprintf("%T", raised)
+		failure.ErrorType = errorType(raised)
 		failure.ErrorBody = b.scrubText(raised.Error())
 	}
 	// unknown_tool's message stays: it describes the request, not a result.
@@ -379,6 +371,19 @@ func (b *installed) emitOutcome(cc callContext, toolName string, known bool, res
 		}
 	}
 	b.emit(cc, "tool_call_error", failure)
+}
+
+// errorType is the error's Go type, looking through fmt.Errorf's wrapper,
+// which names no failure: "lookup: %w" around a notFound is notFound.
+func errorType(err error) string {
+	for {
+		name := reflect.TypeOf(err).String()
+		inner := errors.Unwrap(err)
+		if !strings.HasPrefix(name, "*fmt.") || inner == nil {
+			return name
+		}
+		err = inner
+	}
 }
 
 func (b *installed) withholding() bool { return b.cfg.ResultCapture == "off" }
@@ -418,7 +423,7 @@ func (b *installed) scrubOptional(s string) *string {
 func (b *installed) emit(cc callContext, eventType string, payload any) {
 	b.cfg.sink.write(Event{
 		EventID:           uuid7(),
-		TenantID:          b.tenantID,
+		TenantID:          b.cfg.VendorID,
 		VendorID:          b.cfg.VendorID,
 		SessionID:         cc.session.id,
 		SequenceNumber:    b.seq.next(cc.session),
@@ -429,7 +434,7 @@ func (b *installed) emit(cc callContext, eventType string, payload any) {
 		Principal:         cc.principal,
 		Organization:      cc.org,
 		CallID:            nonEmpty(cc.callID),
-		TransportObserved: cc.transport,
+		TransportObserved: cc.session.transport,
 		SessionIDOrigin:   cc.session.origin,
 		RuntimeMeta:       cc.runtimeMeta,
 		EventType:         eventType,
@@ -445,28 +450,25 @@ type lastSurface struct {
 	tools []*mcp.Tool
 }
 
-func (l *lastSurface) unchanged(tools []vendorTool) bool {
+func (l *lastSurface) unchanged(tools listing) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.seen && slices.EqualFunc(l.tools, tools, func(a *mcp.Tool, t vendorTool) bool { return a == t.tool }) {
+	if l.seen && slices.Equal(l.tools, tools) {
 		return true
 	}
 	l.seen = true
-	l.tools = l.tools[:0]
-	for _, t := range tools {
-		l.tools = append(l.tools, t.tool)
-	}
+	l.tools = slices.Clone(tools)
 	return false
 }
 
-func sortedToolMaps(tools []vendorTool) []map[string]any {
-	sorted := slices.SortedFunc(slices.Values(tools), func(x, y vendorTool) int { return strings.Compare(x.tool.Name, y.tool.Name) })
+func (b *installed) sortedToolMaps(l listing) []map[string]any {
+	sorted := slices.SortedFunc(slices.Values(l), func(x, y *mcp.Tool) int { return strings.Compare(x.Name, y.Name) })
 	out := make([]map[string]any, 0, len(sorted))
 	for _, t := range sorted {
 		out = append(out, map[string]any{
-			"name":        t.tool.Name,
-			"description": t.tool.Description,
-			"inputSchema": t.schema,
+			"name":        t.Name,
+			"description": t.Description,
+			"inputSchema": b.schema(t),
 		})
 	}
 	return out
