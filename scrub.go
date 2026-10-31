@@ -33,7 +33,9 @@ func rule(category, pattern string) scrubRule {
 // Order matters where patterns overlap: jwt before bearer, keys before email.
 var scrubRules = []scrubRule{
 	rule("jwt", `\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b`),
-	rule("bearer", `(?i)\bBearer[`+wsChars+`]+[A-Za-z0-9_\-.+/=]{16,}`),
+	// Only the word ignores case: (?i) on the token class would also match
+	// ſ and K (Kelvin). TestScrubberMatchesBatonSDKOnTheSpecCases pins it.
+	rule("bearer", `\b(?i:bearer)[`+wsChars+`]+[A-Za-z0-9_\-.+/=]{16,}`),
 	rule("sk_key", `\bsk-[A-Za-z0-9_\-]{20,}\b`),
 	rule("aws_key", `\bAKIA[0-9A-Z]{16}\b`),
 	rule("email", `\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b`),
