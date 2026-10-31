@@ -17,7 +17,7 @@ func (s *memorySink) write(ev Event) {
 	s.events = append(s.events, ev)
 }
 
-func (s *memorySink) close(context.Context) error { return nil }
+func (s *memorySink) close(context.Context) {}
 
 func (s *memorySink) all() []Event {
 	s.mu.Lock()

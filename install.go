@@ -1,6 +1,6 @@
 // Package baton sends what happens on a go-sdk MCP server's tools to Baton.
 //
-//	handle, err := baton.Install(server, baton.Config{VendorID: "acme", DSN: os.Getenv("BATON_DSN")})
+//	handle, err := baton.Install(server, baton.Config{DSN: "https://baton_pk_...@ingest.goodtiming.ai/ten_.../my-server"})
 //	defer handle.Close(context.Background())
 package baton
 
@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"regexp"
 	"slices"
 	"strings"
@@ -25,8 +26,10 @@ const sdkVersion = "go-" + Version
 const defaultConsentToken = "customer-consented"
 
 type Config struct {
+	// DSN is the value from /account, and names the server. Empty means the
+	// BATON_DSN environment variable; with neither, Install adds nothing and
+	// records nothing.
 	DSN               string
-	VendorID          string
 	VendorDisplayName string
 	ConsentToken      string
 	// ResultCapture is "full" (default) or "off", which withholds results
@@ -43,8 +46,6 @@ type Config struct {
 	// NoScrub turns it off.
 	Scrubber         func(any) any
 	ResolvePrincipal ResolvePrincipal
-
-	sink sink
 }
 
 // PublicError marks an error message as safe to send under ResultCapture
@@ -57,12 +58,12 @@ type Handle struct {
 	b *installed
 }
 
-// Close sends what is still buffered and stops.
-func (h *Handle) Close(ctx context.Context) error {
-	if h == nil {
-		return nil
+// Close sends what is still buffered until ctx's deadline, or for 3 seconds
+// when ctx has none, then stops. Events recorded after Close are dropped.
+func (h *Handle) Close(ctx context.Context) {
+	if h != nil && h.b != nil {
+		h.b.sink.close(ctx)
 	}
-	return h.b.close(ctx)
 }
 
 var toolNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
@@ -71,6 +72,9 @@ const toolCacheCap = 4096
 
 type installed struct {
 	cfg                 Config
+	vendorID            string
+	tenantID            string
+	sink                sink
 	displayName         string
 	annotateName        string
 	annotate            annotateTool
@@ -86,12 +90,11 @@ type installed struct {
 	sentSurfaces        *lru[string, struct{}]
 	lastSurface         lastSurface
 	clashWarned         sync.Once
-	closeOnce           sync.Once
-	closeErr            error
 }
 
 // Install adds Baton to server. Call it after the vendor's own AddTool lines;
-// tools added later are covered too.
+// tools added later are covered too. Call it once per server: each Install
+// starts its own sender, which runs until Close.
 func Install(server *mcp.Server, cfg Config) (*Handle, error) {
 	if server == nil {
 		return nil, errors.New("baton: Install needs a server")
@@ -100,6 +103,21 @@ func Install(server *mcp.Server, cfg Config) (*Handle, error) {
 	if err != nil {
 		return nil, err
 	}
+	raw := cmp.Or(cfg.DSN, os.Getenv("BATON_DSN"))
+	if raw == "" {
+		slog.Warn("baton: no DSN (Config.DSN or BATON_DSN), so Baton is not installed and records nothing")
+		return &Handle{}, nil
+	}
+	d, err := parseDSN(raw)
+	if err != nil {
+		return nil, err
+	}
+	b.vendorID, b.tenantID = d.vendorID, d.tenantID
+	return b.install(server, func() sink { return newHTTPSink(d.origin, d.key) })
+}
+
+// install starts the sink last, after everything that can fail.
+func (b *installed) install(server *mcp.Server, openSink func() sink) (*Handle, error) {
 	meta, err := probeServer(server)
 	if err != nil {
 		// Never stop the vendor's server over this: the names fall back to
@@ -111,6 +129,7 @@ func Install(server *mcp.Server, cfg Config) (*Handle, error) {
 	if err := b.nameTheAnnotateTool(); err != nil {
 		return nil, err
 	}
+	b.sink = openSink()
 	server.AddReceivingMiddleware(b.middleware)
 	return &Handle{b: b}, nil
 }
@@ -123,9 +142,6 @@ func oneOf(field, value string, allowed ...string) error {
 }
 
 func configure(cfg Config) (*installed, error) {
-	if cfg.VendorID == "" {
-		return nil, errors.New("baton: Config.VendorID is required")
-	}
 	cfg.ConsentToken = cmp.Or(cfg.ConsentToken, defaultConsentToken)
 	cfg.ResultCapture = cmp.Or(cfg.ResultCapture, "full")
 	cfg.IntentParam = cmp.Or(cfg.IntentParam, "required")
@@ -139,9 +155,6 @@ func configure(cfg Config) (*installed, error) {
 		oneOf("ReportMode", cfg.ReportMode, "on", "off"),
 	); err != nil {
 		return nil, err
-	}
-	if cfg.sink == nil {
-		return nil, errors.New("baton: sending to the console is not built yet")
 	}
 	b := &installed{
 		cfg:                 cfg,
@@ -164,13 +177,13 @@ func configure(cfg Config) (*installed, error) {
 // any session: a stateless server lists tools in one request and calls them
 // in another, maybe in another process.
 func (b *installed) nameTheAnnotateTool() error {
-	b.displayName = cmp.Or(b.cfg.VendorDisplayName, b.server.name, b.cfg.VendorID)
+	b.displayName = cmp.Or(b.cfg.VendorDisplayName, b.server.name, b.vendorID)
 	if b.cfg.ReportMode != "on" {
 		return nil
 	}
 	candidates := []string{b.cfg.AnnotationToolName}
 	if b.cfg.AnnotationToolName == "" {
-		candidates = []string{slugAnnotateName(b.server.name), b.cfg.VendorID + annotateSuffix}
+		candidates = []string{slugAnnotateName(b.server.name), b.vendorID + annotateSuffix}
 	}
 	var err error
 	for i, name := range candidates {
@@ -214,11 +227,4 @@ func slugAnnotateName(serverName string) string {
 		return ""
 	}
 	return slug + annotateSuffix
-}
-
-func (b *installed) close(ctx context.Context) error {
-	b.closeOnce.Do(func() {
-		b.closeErr = b.cfg.sink.close(ctx)
-	})
-	return b.closeErr
 }

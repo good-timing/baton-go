@@ -421,10 +421,10 @@ func (b *installed) scrubOptional(s string) *string {
 }
 
 func (b *installed) emit(cc callContext, eventType string, payload any) {
-	b.cfg.sink.write(Event{
+	b.sink.write(Event{
 		EventID:           uuid7(),
-		TenantID:          b.cfg.VendorID,
-		VendorID:          b.cfg.VendorID,
+		TenantID:          b.tenantID,
+		VendorID:          b.vendorID,
 		SessionID:         cc.session.id,
 		SequenceNumber:    b.seq.next(cc.session),
 		CapturedAt:        time.Now().UTC().Format(time.RFC3339Nano),

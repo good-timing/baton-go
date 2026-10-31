@@ -69,17 +69,11 @@ func mainScenario(t *testing.T) []Event {
 	mcp.AddTool(server, &mcp.Tool{Name: "soft_fail"}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
 		return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: "simulated returned failure"}}}, nil, nil
 	})
-	sink := &memorySink{}
-	handle, err := Install(server, Config{
-		VendorID:          "spec-vectors",
+	handle, sink := installAs(t, server, Config{
 		VendorDisplayName: "Spec Vector Generator",
 		ConsentToken:      "ct_spec_vectors",
 		ReportMode:        "on",
-		sink:              sink,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	}, "spec-vectors")
 	cs := connect(t, server)
 	call(t, cs, "lookup", map[string]any{"name": "alice"})
 	call(t, cs, "boom", map[string]any{})
@@ -95,18 +89,12 @@ func mainScenario(t *testing.T) []Event {
 func identifiedScenario(t *testing.T) []Event {
 	server := newVectorServer()
 	mcp.AddTool(server, &mcp.Tool{Name: "lookup"}, lookup)
-	sink := &memorySink{}
-	_, err := Install(server, Config{
-		VendorID:     "spec-vectors",
+	_, sink := installAs(t, server, Config{
 		ConsentToken: "ct_spec_vectors",
 		ResolvePrincipal: func(context.Context, *auth.TokenInfo) (*Principal, error) {
 			return &Principal{ID: "user-123", DisplayName: "Jane", Organization: &Organization{ID: "org-456", DisplayName: "Acme"}}, nil
 		},
-		sink: sink,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	}, "spec-vectors")
 	cs := connect(t, server)
 	call(t, cs, "lookup", map[string]any{"name": "alice", "user_goal": "1: find alice; success is a match"})
 	return sink.all()

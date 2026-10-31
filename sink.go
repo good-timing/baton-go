@@ -6,5 +6,5 @@ import "context"
 // panic (SPEC §11.2).
 type sink interface {
 	write(Event)
-	close(context.Context) error
+	close(context.Context)
 }

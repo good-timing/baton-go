@@ -96,7 +96,7 @@ func TestMetaCoordinatesAreRounded(t *testing.T) {
 
 func TestAVendorToolWithTheAnnotateNameWins(t *testing.T) {
 	ran := false
-	server, sink := installWithSink(t, Config{VendorID: "acme", ReportMode: "on", AnnotationToolName: "lookup"}, func(s *mcp.Server) {
+	server, sink := installWithSink(t, Config{ReportMode: "on", AnnotationToolName: "lookup"}, func(s *mcp.Server) {
 		mcp.AddTool(s, &mcp.Tool{Name: "lookup"}, func(_ context.Context, r *mcp.CallToolRequest, in lookupIn) (*mcp.CallToolResult, lookupOut, error) {
 			ran = true
 			return nil, lookupOut{Found: true, Name: in.Name}, nil
