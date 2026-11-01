@@ -53,6 +53,7 @@ func (b *installed) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 func guard(what string, f func()) {
 	defer func() {
 		if r := recover(); r != nil {
+			processDrops.add(dropEncodeFailed, 1)
 			slog.Error("baton: internal failure; the request goes on without it", "step", what, "panic", r)
 		}
 	}()

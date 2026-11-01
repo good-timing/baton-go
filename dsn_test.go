@@ -99,6 +99,8 @@ func TestParseDSNRefuses(t *testing.T) {
 
 func captureLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
+	// Drops left by an earlier test would show up in this one's logs.
+	freshDrops(t)
 	var buf bytes.Buffer
 	old := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))

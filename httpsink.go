@@ -97,6 +97,7 @@ func (s *httpSink) write(e Event) {
 	dropped := !closed && s.push(e)
 	s.mu.Unlock()
 	if closed {
+		processDrops.add(dropAfterClose, 1)
 		s.lateWarned.Do(func() {
 			slog.Warn("baton: an event was recorded after Close and has been dropped; later ones are dropped silently")
 		})
@@ -117,6 +118,7 @@ func (s *httpSink) push(e Event) bool {
 	full := len(s.queue) >= bufferCap
 	if full {
 		s.popFront()
+		processDrops.add(dropBufferFull, 1)
 	}
 	s.queue = append(s.queue, e)
 	return full
@@ -126,6 +128,7 @@ func (s *httpSink) push(e Event) bool {
 // When the queue is full, e is the oldest and is the one dropped.
 func (s *httpSink) putBack(e Event) bool {
 	if len(s.queue) >= bufferCap {
+		processDrops.add(dropBufferFull, 1)
 		return true
 	}
 	s.queue = slices.Insert(s.queue, 0, e)
@@ -169,9 +172,10 @@ func (s *httpSink) run() {
 func (s *httpSink) drain() bool {
 	for s.breakerAllows() {
 		s.mu.Lock()
-		if len(s.queue) == 0 {
+		// Once close has given up, what is queued is close's to count.
+		if empty := len(s.queue) == 0; empty || s.ctx.Err() != nil {
 			s.mu.Unlock()
-			return true
+			return empty
 		}
 		e := s.popFront()
 		s.inFlight = true
@@ -181,14 +185,21 @@ func (s *httpSink) drain() bool {
 
 		s.mu.Lock()
 		s.inFlight = false
-		dropped := result == transient && s.putBack(e)
+		stopped := result == transient && s.ctx.Err() != nil
+		dropped := result == transient && !stopped && s.putBack(e)
 		s.mu.Unlock()
+		if stopped {
+			processDrops.add(dropUnsentAtClose, 1)
+		}
 		if dropped {
 			s.warnOverflow()
 		}
 
 		switch result {
 		case sent, refused:
+			if result == sent {
+				processDrops.logRecovery()
+			}
 			s.failures = 0
 			s.openedAt = time.Time{}
 		case transient:
@@ -211,6 +222,7 @@ func (s *httpSink) breakerAllows() bool {
 func (s *httpSink) send(e Event) outcome {
 	body, err := json.Marshal(e)
 	if err != nil {
+		processDrops.add(dropEncodeFailed, 1)
 		slog.Warn("baton: an event could not be encoded and has been dropped; the events after it are still sent",
 			"event_type", e.EventType, "error_type", fmt.Sprintf("%T", err))
 		return unencodable
@@ -250,6 +262,7 @@ func (s *httpSink) post(body []byte) outcome {
 	case status >= 200 && status < 300:
 		return sent
 	case status >= 400 && status < 500 && status != http.StatusTooManyRequests:
+		processDrops.add(dropRefused, 1)
 		slog.Warn("baton: the collector REFUSED an event and it has been dropped; nothing retries a 4xx",
 			"status", status, "body", strings.ToValidUTF8(string(detail), "?"))
 		return refused
@@ -291,9 +304,12 @@ func (s *httpSink) close(ctx context.Context) {
 		s.client.CloseIdleConnections()
 		s.mu.Lock()
 		unsent = len(s.queue)
-		if s.inFlight {
+		inFlight := s.inFlight
+		s.mu.Unlock()
+		// One being sent is counted by drain, when its send ends.
+		processDrops.add(dropUnsentAtClose, unsent)
+		if inFlight {
 			unsent++
 		}
-		s.mu.Unlock()
 	})
 }

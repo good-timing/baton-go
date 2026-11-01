@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Every event the SDK does not deliver is counted, by reason:**
+  `buffer_full`, `refused`, `encode_failed`, `after_close` and
+  `unsent_at_close`, the names `baton-sdk` and `baton-ts` use. The counts are
+  internal for now. After a loss, the first event delivered logs one warning
+  with what was lost, at most once a minute. A run that loses nothing logs
+  nothing new.
+
 ## 0.0.1
 
 The first release: `baton.Install` on a go-sdk `*mcp.Server`.

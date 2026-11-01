@@ -1,0 +1,77 @@
+package baton
+
+import (
+	"fmt"
+	"log/slog"
+	"maps"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+// dropReason is why an event was not delivered. The names go on the wire in a
+// later release, so they change only with SPEC.
+type dropReason string
+
+const (
+	dropBufferFull    dropReason = "buffer_full"
+	dropRefused       dropReason = "refused"
+	dropEncodeFailed  dropReason = "encode_failed"
+	dropAfterClose    dropReason = "after_close"
+	dropUnsentAtClose dropReason = "unsent_at_close"
+)
+
+// recoveryLogEvery is the least time between two "delivering again" warnings,
+// so steady loss beside steady delivery, such as a full buffer, is not one
+// warning per event.
+const recoveryLogEvery = time.Minute
+
+// dropCounts is the events this process did not deliver, by reason: every
+// event is either delivered or counted here. One per process, like the
+// sequence clock.
+type dropCounts struct {
+	mu              sync.Mutex
+	total           map[dropReason]int
+	sinceDelivery   map[dropReason]int
+	lastRecoveryLog time.Time
+}
+
+var processDrops = &dropCounts{total: map[dropReason]int{}, sinceDelivery: map[dropReason]int{}}
+
+func (d *dropCounts) add(reason dropReason, n int) {
+	if n <= 0 {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.total[reason] += n
+	d.sinceDelivery[reason] += n
+}
+
+func (d *dropCounts) totals() map[dropReason]int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return maps.Clone(d.total)
+}
+
+// logRecovery is called on each delivery: it names what was lost before it,
+// the other half of a drop's own warning, which says only that loss started.
+func (d *dropCounts) logRecovery() {
+	d.mu.Lock()
+	if len(d.sinceDelivery) == 0 || time.Since(d.lastRecoveryLog) < recoveryLogEvery {
+		d.mu.Unlock()
+		return
+	}
+	lost := d.sinceDelivery
+	d.sinceDelivery = map[dropReason]int{}
+	d.lastRecoveryLog = time.Now()
+	d.mu.Unlock()
+	total, parts := 0, []string{}
+	for _, reason := range slices.Sorted(maps.Keys(lost)) {
+		total += lost[reason]
+		parts = append(parts, string(reason)+" "+strconv.Itoa(lost[reason]))
+	}
+	slog.Warn(fmt.Sprintf("baton: delivering again; %d event(s) lost before this: %s.", total, strings.Join(parts, ", ")))
+}
