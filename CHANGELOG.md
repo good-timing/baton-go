@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0
 
 - **Every event the SDK does not deliver is counted, by reason:**
   `buffer_full`, `refused`, `encode_failed`, `after_close` and
