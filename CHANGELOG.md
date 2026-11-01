@@ -10,6 +10,13 @@
   - A `_meta` key such as `LATİTUDE` is no longer rounded as a coordinate.
   - A server called "İAPI" gets the annotation tool `i-api_annotate`, not
     `iapi_annotate`.
+- **`params` is always an object, as the schema says.** Before, a collector
+  that checks the schema could refuse the event.
+  - With no arguments it is `{}`, as in `baton-sdk`. So are arguments that
+    are not an object, such as `[1, 2]`. Before, it was `null` or the array.
+  - When the `Scrubber` returns something that cannot be sent as an object,
+    such as a string, it is `{}`, and this is logged once. A map of another
+    Go type, such as `map[string]string`, is still sent.
 
 ## 0.1.0
 

@@ -427,15 +427,23 @@ func (b *installed) scrubOptionalOrNil(s, field string) *string {
 	return nil
 }
 
-// scrubParams sends {} for arguments the Scrubber panics on, as baton-sdk's
-// official adapter does: dropping the start would lose the whole call
-// (TestAScrubberThatPanicsOnTheArgumentsSendsNoneOfThem).
-func (b *installed) scrubParams(params any) any {
-	if params == nil {
-		return nil
+// The schema says params is an object, so a value that is not one is sent as
+// {} (TestParamsIsAlwaysAnObject, TestAScrubberThatPanicsOnTheArgumentsSendsNoneOfThem).
+func (b *installed) scrubParams(params any) map[string]any {
+	if _, ok := params.(map[string]any); !ok {
+		params = map[string]any{}
 	}
-	if out := b.scrubOrNil(params, "params"); out != nil {
-		return out
+	out := b.scrubOrNil(params, "params")
+	if m, ok := out.(map[string]any); ok && m != nil {
+		return m
+	}
+	if m, ok := jsonValue(out).(map[string]any); ok {
+		return m
+	}
+	if out != nil {
+		b.paramsShapeWarned.Do(func() {
+			slog.Error("baton: the Scrubber returned params that cannot be sent as a JSON object; {} is sent instead", "type", reflect.TypeOf(out))
+		})
 	}
 	return map[string]any{}
 }

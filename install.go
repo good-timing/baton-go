@@ -91,6 +91,7 @@ type installed struct {
 	lastSurface         lastSurface
 	clashWarned         sync.Once
 	scrubPanicLogged    sync.Map
+	paramsShapeWarned   sync.Once
 }
 
 // Install adds Baton to server. Call it after the vendor's own AddTool lines;

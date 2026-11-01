@@ -2,6 +2,7 @@ package baton
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"reflect"
@@ -280,8 +281,8 @@ func TestAScrubberThatPanicsOnTheArgumentsSendsNoneOfThem(t *testing.T) {
 	if n := encodeFailedDrops(); n != 0 {
 		t.Errorf("%d drops counted, want 0: nothing was lost", n)
 	}
-	if n := strings.Count(logs.String(), "the Scrubber panicked"); n != 1 {
-		t.Errorf("%d panic logs, want 1", n)
+	if n := strings.Count(logs.String(), "the Scrubber panicked"); n != 1 || strings.Contains(logs.String(), "cannot be sent as a JSON object") {
+		t.Errorf("%d panic logs, want 1 and no other:\n%s", n, logs)
 	}
 }
 
@@ -315,6 +316,56 @@ func scrubberPanicsOnAFailure(t *testing.T, scrub func(any) any, lost int) {
 	}
 	if n := encodeFailedDrops(); n != lost {
 		t.Errorf("%d drops counted, want %d", n, lost)
+	}
+}
+
+func TestParamsIsAlwaysAnObject(t *testing.T) {
+	objectsTo := func(r any) func(any) any {
+		return func(v any) any {
+			if _, ok := v.(map[string]any); ok {
+				return r
+			}
+			return v
+		}
+	}
+	for name, c := range map[string]struct {
+		args   any
+		scrub  func(any) any
+		want   map[string]any
+		logged bool
+	}{
+		"arguments: null":                     {json.RawMessage("null"), NoScrub, map[string]any{}, false},
+		"an array":                            {[]any{1, 2}, NoScrub, map[string]any{}, false},
+		"a Scrubber that returns a string":    {map[string]any{"a": 1}, objectsTo("[redacted]"), map[string]any{}, true},
+		"a Scrubber that returns a typed map": {map[string]any{"a": 1}, objectsTo(map[string]string{"a": "[redacted]"}), map[string]any{"a": "[redacted]"}, false},
+		"a Scrubber that returns a nil map":   {map[string]any{"a": 1}, objectsTo(map[string]any(nil)), map[string]any{}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logs := captureLogs(t)
+			server, sink := installWithSink(t, Config{Scrubber: c.scrub}, func(s *mcp.Server) {
+				mcp.AddTool(s, &mcp.Tool{Name: "ping"}, func(context.Context, *mcp.CallToolRequest, any) (*mcp.CallToolResult, any, error) {
+					return nil, nil, nil
+				})
+			})
+			cs := connect(t, server)
+			for range 2 {
+				if _, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "ping", Arguments: c.args}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, e := range asJSON(t, ofType(sink.all(), "tool_call_start")) {
+				if p := e["payload"].(map[string]any)["params"]; !reflect.DeepEqual(p, c.want) {
+					t.Errorf("params %#v, want %v", p, c.want)
+				}
+			}
+			want := 0
+			if c.logged {
+				want = 1
+			}
+			if n := strings.Count(logs.String(), "cannot be sent as a JSON object"); n != want {
+				t.Errorf("%d logs over 2 calls, want %d:\n%s", n, want, logs)
+			}
+		})
 	}
 }
 

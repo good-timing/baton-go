@@ -31,12 +31,12 @@ type identityWire struct {
 }
 
 type toolCallStart struct {
-	ToolName     string  `json:"tool_name"`
-	Params       any     `json:"params"`
-	CallIntent   *string `json:"call_intent"`
-	CallExpected *string `json:"call_expected"`
-	CallWorkflow *string `json:"call_workflow"`
-	IntentSource *string `json:"intent_source"`
+	ToolName     string         `json:"tool_name"`
+	Params       map[string]any `json:"params"`
+	CallIntent   *string        `json:"call_intent"`
+	CallExpected *string        `json:"call_expected"`
+	CallWorkflow *string        `json:"call_workflow"`
+	IntentSource *string        `json:"intent_source"`
 }
 
 type toolCallEnd struct {
