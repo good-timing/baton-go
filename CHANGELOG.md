@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Names with "İ" (U+0130) now match `baton-sdk`.** Go lowercases İ to "i",
+  but Python lowercases it to "i" plus a dot mark, which matches no field
+  name. Three places follow Python now:
+  - The scrubber no longer redacts a key such as `APİ_KEY` as `api_key`, so
+    its value is sent unless a pattern rule catches it.
+  - A `_meta` key such as `LATİTUDE` is no longer rounded as a coordinate.
+  - A server called "İAPI" gets the annotation tool `i-api_annotate`, not
+    `iapi_annotate`.
+
 ## 0.1.0
 
 - **Every event the SDK does not deliver is counted, by reason:**

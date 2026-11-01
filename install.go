@@ -235,7 +235,7 @@ func slugAnnotateName(serverName string) string {
 			return r
 		}
 		return '-'
-	}, strings.ToLower(serverName))
+	}, lowerLikePython(serverName))
 	slug := strings.Trim(collapseHyphens.ReplaceAllString(mapped, "-"), "-")
 	if len(slug) > slugCap {
 		slug = strings.Trim(slug[:slugCap], "-")

@@ -26,7 +26,7 @@ func roundMetaCoordinates(meta map[string]any) map[string]any {
 var decimalString = regexp.MustCompile(`^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$`)
 
 func isCoordKey(k string) bool {
-	k = strings.ToLower(k)
+	k = lowerLikePython(k)
 	return k == "latitude" || k == "longitude"
 }
 

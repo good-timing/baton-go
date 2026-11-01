@@ -3,7 +3,6 @@ package baton
 import (
 	"log/slog"
 	"regexp"
-	"strings"
 	"sync"
 )
 
@@ -79,7 +78,7 @@ func scrubWalk(value any, depth int, forceField string) any {
 		out := make(map[string]any, len(v))
 		for k, item := range v {
 			field := forceField
-			if lower := strings.ToLower(k); redactFieldNames[lower] {
+			if lower := lowerLikePython(k); redactFieldNames[lower] {
 				field = lower
 			}
 			out[k] = scrubWalk(item, depth+1, field)

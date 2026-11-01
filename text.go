@@ -109,3 +109,10 @@ func cutRunes(s string, n int) string {
 	}
 	return s
 }
+
+// lowerLikePython is for a name baton-sdk lowers with str.lower. Go lowers
+// İ (U+0130) to "i" and Python to "i̇", the only difference an ASCII name can
+// see (TestNamesLowerLikePython, TestScrubberMatchesBatonSDKOnTheSpecCases).
+func lowerLikePython(s string) string {
+	return strings.ToLower(strings.ReplaceAll(s, "\u0130", "i\u0307"))
+}

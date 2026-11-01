@@ -89,7 +89,7 @@ Only what crosses the MCP call. The SDK never reads your logs, your database or 
 
 ## PII scrubbing
 
-**On by default.** `baton.DefaultScrubber` walks the arguments, results, error text, `_meta` and agent reports, and redacts email / `Bearer …` / `sk-*` / `AKIA*` / JWT / Luhn-validated card / NA-format phone, plus a list of sensitive field names. It is the same ruleset as the Python SDK, checked against the same 800 test cases. Opt out with `Scrubber: baton.NoScrub`, or pass your own `func(any) any`. Your server's instructions and your tools' names, descriptions and schemas are not scrubbed: they are sent as you wrote them.
+**On by default.** `baton.DefaultScrubber` walks the arguments, results, error text, `_meta` and agent reports, and redacts email / `Bearer …` / `sk-*` / `AKIA*` / JWT / Luhn-validated card / NA-format phone, plus a list of sensitive field names. It is the same ruleset as the Python SDK, checked against the same shared test cases. Opt out with `Scrubber: baton.NoScrub`, or pass your own `func(any) any`. Your server's instructions and your tools' names, descriptions and schemas are not scrubbed: they are sent as you wrote them.
 
 **It is pattern matching, not a guarantee.** `{"name": "Jane Doe", "address": "12 Elm St"}` passes through untouched, and a card number is redacted when its digits are contiguous but **not** when they are spaced or hyphenated. Decide what your server puts in tool params and results on that basis. Do not tell your users "PII is scrubbed" on the strength of it. [What it does and does not catch](https://goodtiming.ai/docs.html#pii).
 

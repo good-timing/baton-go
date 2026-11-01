@@ -153,6 +153,16 @@ func TestAScrubberThatPanicsOnClientTextLosesOnlyThatValue(t *testing.T) {
 	}
 }
 
+func TestNamesLowerLikePython(t *testing.T) {
+	// What baton-sdk's slug_server_name and _is_coord_key give for these.
+	if got := slugAnnotateName("İAPI"); got != "i-api_annotate" {
+		t.Errorf("slug = %q, want i-api_annotate", got)
+	}
+	if isCoordKey("LATİTUDE") || !isCoordKey("LATITUDE") {
+		t.Error("LATİTUDE is not a coordinate key in baton-sdk, and LATITUDE is")
+	}
+}
+
 func TestCutRunes(t *testing.T) {
 	for _, c := range []struct {
 		in   string
