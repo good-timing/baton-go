@@ -497,3 +497,16 @@ func TestAnUnencodableEventIsLoggedWithoutItsText(t *testing.T) {
 		t.Errorf("%d requests; logs: %s", console.count(), logs)
 	}
 }
+
+func TestAnEventThatPanicsWhenEncodedIsDropped(t *testing.T) {
+	console := newFakeConsole(t, nil)
+	logs := captureLogs(t)
+	before := encodeFailedDrops()
+	s := fastSink(console)
+	s.write(Event{EventType: "tool_call_end", Payload: map[string]any{"result": panicsWhenEncoded{}}})
+	s.write(testEvent(2))
+	s.close(context.Background())
+	if console.count() != 1 || encodeFailedDrops() != before+1 || strings.Contains(logs.String(), "cannot encode") {
+		t.Errorf("%d requests, %d dropped; logs: %s", console.count(), encodeFailedDrops()-before, logs)
+	}
+}

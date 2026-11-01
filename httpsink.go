@@ -306,7 +306,7 @@ func (s *httpSink) breakerAllows() bool {
 }
 
 func (s *httpSink) send(e Event) outcome {
-	body, err := json.Marshal(e)
+	body, err := encodeEvent(e)
 	if err != nil {
 		processDrops.add(dropEncodeFailed, 1)
 		slog.Warn("baton: an event could not be encoded and has been dropped; the events after it are still sent",
@@ -326,6 +326,21 @@ func (s *httpSink) send(e Event) outcome {
 			return transient
 		}
 	}
+}
+
+type encodePanicked struct{}
+
+func (encodePanicked) Error() string { return "encoding panicked" }
+
+// encodeEvent turns a panic in a vendor value's MarshalJSON into an error: on
+// this goroutine it would crash the vendor's process (TestAnEventThatPanicsWhenEncodedIsDropped).
+func encodeEvent(e Event) (body []byte, err error) {
+	defer func() {
+		if recover() != nil {
+			err = encodePanicked{}
+		}
+	}()
+	return json.Marshal(e)
 }
 
 // do posts body and returns the status and the start of the answer's body.

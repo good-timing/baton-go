@@ -26,6 +26,10 @@
   `context` keep a `Scrubber` result that encodes as a JSON object, such as
   a `map[string]string`.** Before, `runtime_meta` and `context` sent it as
   `null`.
+- **A value whose `MarshalJSON` panics no longer crashes your server.** When
+  a `Scrubber` returned one, for a tool result or inside a map, the panic
+  happened in the background sender and stopped the process. Now only that
+  event is dropped, and it is counted as `encode_failed`.
 
 ## 0.1.0
 
