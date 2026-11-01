@@ -219,6 +219,7 @@ type callContext struct {
 	principal   *identityWire
 	org         *identityWire
 	runtimeMeta map[string]any
+	client      *clientObserved
 }
 
 func (b *installed) newCallContext(ctx context.Context, r *mcp.CallToolRequest) callContext {
@@ -231,10 +232,11 @@ func (b *installed) newCallContext(ctx context.Context, r *mcp.CallToolRequest) 
 		session: b.sessions.resolve(r.Session, header),
 	}
 	cc.principal, cc.org = resolveCaller(ctx, b.cfg.ResolvePrincipal, token)
+	cc.client = b.observeClient(r.Params.Meta, r.Session, header)
 	if len(r.Params.Meta) > 0 {
 		meta, _ := jsonValue(map[string]any(r.Params.Meta)).(map[string]any)
 		// Rounded before the vendor's scrubber, so NoScrub keeps the rounding.
-		if m, ok := b.scrubValue(roundMetaCoordinates(meta)).(map[string]any); ok {
+		if m, ok := b.scrubOrNil(roundMetaCoordinates(meta), "runtime_meta").(map[string]any); ok {
 			cc.runtimeMeta = m
 		}
 	}
@@ -270,7 +272,7 @@ func (b *installed) toolCall(ctx context.Context, next mcp.MethodHandler, method
 		if listed {
 			b.maybeSnapshot(l)
 		}
-		start := toolCallStart{ToolName: r.Params.Name, Params: b.scrubValue(params), CallIntent: b.scrubOptional(goal)}
+		start := toolCallStart{ToolName: r.Params.Name, Params: b.scrubParams(params), CallIntent: b.scrubOptionalOrNil(goal, userGoalParam)}
 		if start.CallIntent != nil {
 			start.IntentSource = ptr(intentSourceParam)
 		}
@@ -399,6 +401,45 @@ func contentText(content []mcp.Content) string {
 	return strings.Join(parts, "\n")
 }
 
+// scrubOrNil is for a value read before its event is built: a Scrubber that
+// panics costs only that value (TestAScrubberThatPanicsBeforeTheEventCostsOnlyThatValue).
+// Inside the build, a panic drops the event, which guard counts: a null result
+// on tool_call_error would read as a raise (SPEC §11.4.3).
+func (b *installed) scrubOrNil(v any, field string) (out any) {
+	defer func() {
+		if r := recover(); r != nil {
+			if _, logged := b.scrubPanicLogged.LoadOrStore(field, true); !logged {
+				slog.Error("baton: the Scrubber panicked; that value is not sent, and later panics on it are not logged", "field", field, "panic", r)
+			}
+			out = nil
+		}
+	}()
+	return b.cfg.Scrubber(v)
+}
+
+func (b *installed) scrubOptionalOrNil(s, field string) *string {
+	if s == "" {
+		return nil
+	}
+	if out, ok := b.scrubOrNil(s, field).(string); ok {
+		return &out
+	}
+	return nil
+}
+
+// scrubParams sends {} for arguments the Scrubber panics on, as baton-sdk's
+// official adapter does: dropping the start would lose the whole call
+// (TestAScrubberThatPanicsOnTheArgumentsSendsNoneOfThem).
+func (b *installed) scrubParams(params any) any {
+	if params == nil {
+		return nil
+	}
+	if out := b.scrubOrNil(params, "params"); out != nil {
+		return out
+	}
+	return map[string]any{}
+}
+
 func (b *installed) scrubValue(v any) any {
 	if v == nil {
 		return nil
@@ -438,6 +479,7 @@ func (b *installed) emit(cc callContext, eventType string, payload any) {
 		TransportObserved: cc.session.transport,
 		SessionIDOrigin:   cc.session.origin,
 		RuntimeMeta:       cc.runtimeMeta,
+		ClientObserved:    cc.client,
 		EventType:         eventType,
 		Payload:           payload,
 	})

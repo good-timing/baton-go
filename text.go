@@ -97,3 +97,15 @@ func refusalText(annotateName string) string {
 		"what_happened. If neither is true, do NOT re-send: that would file a " +
 		"report for a call that did not go wrong."
 }
+
+// cutRunes keeps the first n code points of s.
+func cutRunes(s string, n int) string {
+	count := 0
+	for i := range s {
+		if count == n {
+			return s[:i]
+		}
+		count++
+	}
+	return s
+}

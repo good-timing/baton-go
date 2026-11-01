@@ -90,6 +90,7 @@ type installed struct {
 	sentSurfaces        *lru[string, struct{}]
 	lastSurface         lastSurface
 	clashWarned         sync.Once
+	scrubPanicLogged    sync.Map
 }
 
 // Install adds Baton to server. Call it after the vendor's own AddTool lines;

@@ -8,6 +8,22 @@
   internal for now. After a loss, the first event delivered logs one warning
   with what was lost, at most once a minute. A run that loses nothing logs
   nothing new.
+- **Events name the client (`client_observed`, SPEC §11.4).** Each tool call
+  and agent report now carries the client's name and version. They come from
+  the request's `_meta`, or else from the connection's handshake. On HTTP it
+  also carries the `User-Agent` and `X-Anthropic-Client` headers, and no other
+  header. Every value is scrubbed, then cut to 128 characters (256 for a
+  header). The Console shows the client's name instead of "app not reported".
+  `surface_snapshot` does not carry it.
+- **A `Scrubber` that panics no longer loses the whole call.** On `_meta` or
+  `user_goal`, only that value is left out. On the arguments, `params` is
+  sent as `{}`, as in `baton-sdk`. Before, any of these lost the call's
+  `tool_call_start` and `tool_call_end`. The same holds for what the client
+  declares. Each is logged once. A panic on a result or error text still drops
+  that one event, as in `baton-sdk`, and it is counted.
+- **A `Scrubber` that panics on an agent's report no longer fails the
+  annotation tool.** The agent is answered `{"ok": true}`, and the event is
+  dropped and counted. Before, the agent got an "unknown tool" error.
 
 ## 0.0.1
 

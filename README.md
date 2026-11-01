@@ -82,7 +82,7 @@ Only what crosses the MCP call. The SDK never reads your logs, your database or 
 
 | Sent | What |
 |---|---|
-| Always | The tool's name, its arguments (`params`, scrubbed), `user_goal`, how long the call took, and on failure the `error_type`. The request's `_meta`, as `runtime_meta` (scrubbed, with any latitude and longitude rounded). Once per change: your server's name, version, capabilities and instructions, and each tool's name, description and schemas. Who the caller is and their company, only if you set `ResolvePrincipal`. |
+| Always | The tool's name, its arguments (`params`, scrubbed), `user_goal`, how long the call took, and on failure the `error_type`. The request's `_meta`, as `runtime_meta` (scrubbed, with any latitude and longitude rounded). What the client declares about itself, such as its name and version, and on HTTP its `User-Agent` and `X-Anthropic-Client` headers. Once per change: your server's name, version, capabilities and instructions, and each tool's name, description and schemas. Who the caller is and their company, only if you set `ResolvePrincipal`. |
 | Only with `ResultCapture: "full"` (the default) | What the tool returned (`result`), including any error text in it, and the message of an `error` your handler returned. |
 | With `ReportMode: "on"` | The reports the agent files, in its own words. |
 | Never | Anything that did not cross the MCP call. |
@@ -142,7 +142,6 @@ None of it blocks the quickstart above.
 - No library API: only a go-sdk `*mcp.Server` is wrapped.
 - Only tools. Resources, prompts and `tools/list` requests emit no events.
 - No local mode, and no file or stderr output: events go to the collector the DSN names.
-- `client_observed` is not sent, so the Console cannot name the client from this SDK's events yet.
 - Arguments that fail go-sdk's input schema, and results that fail its output schema, are recorded as `tool_call_error` with no `failure_kind`.
 
 ## Wire compatibility

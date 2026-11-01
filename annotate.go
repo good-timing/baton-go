@@ -57,6 +57,13 @@ func (b *installed) answerAnnotate(ctx context.Context, r *mcp.CallToolRequest) 
 	if strings.TrimSpace(args.WhatHappened) == "" {
 		return toolAnswer(map[string]any{"ok": false, "error": b.annotate.refusal}, false)
 	}
+	// The agent's report is answered even when its event is lost
+	// (TestAScrubberThatPanicsOnAnAnnotationStillAnswersIt).
+	guard("annotation", func() { b.emitAnnotation(ctx, r, args) })
+	return toolAnswer(map[string]any{"ok": true}, false)
+}
+
+func (b *installed) emitAnnotation(ctx context.Context, r *mcp.CallToolRequest, args annotateArgs) {
 	// tool_name is sent as given, so "" (no tool exists) and absent differ
 	// (SPEC §5.1.1).
 	payload := annotation{
@@ -72,7 +79,6 @@ func (b *installed) answerAnnotate(ctx context.Context, r *mcp.CallToolRequest) 
 		payload.Context, _ = b.scrubValue(extra).(map[string]any)
 	}
 	b.emit(b.newCallContext(ctx, r), "annotation", payload)
-	return toolAnswer(map[string]any{"ok": true}, false)
 }
 
 func toolAnswer(body map[string]any, isError bool) *mcp.CallToolResult {

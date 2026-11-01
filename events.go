@@ -1,27 +1,26 @@
 package baton
 
 // Event is one envelope (SPEC §11.4). Members with no value are sent as JSON
-// null, never left out, so the wire matches the other producers byte for byte;
-// some, such as client_observed and call_expected, this producer never fills.
+// null, never left out, so the wire matches the other producers byte for byte.
 type Event struct {
-	EventID           string         `json:"event_id"`
-	TenantID          string         `json:"tenant_id"`
-	VendorID          string         `json:"vendor_id"`
-	SessionID         string         `json:"session_id"`
-	SequenceNumber    int64          `json:"sequence_number"`
-	CapturedAt        string         `json:"captured_at"`
-	ConsentToken      string         `json:"consent_token"`
-	SDKVersion        string         `json:"sdk_version"`
-	AgentRuntime      string         `json:"agent_runtime"`
-	ClientObserved    map[string]any `json:"client_observed"`
-	Principal         *identityWire  `json:"principal"`
-	Organization      *identityWire  `json:"organization"`
-	CallID            *string        `json:"call_id"`
-	TransportObserved *string        `json:"transport_observed"`
-	SessionIDOrigin   string         `json:"session_id_origin"`
-	RuntimeMeta       map[string]any `json:"runtime_meta"`
-	EventType         string         `json:"event_type"`
-	Payload           any            `json:"payload"`
+	EventID           string          `json:"event_id"`
+	TenantID          string          `json:"tenant_id"`
+	VendorID          string          `json:"vendor_id"`
+	SessionID         string          `json:"session_id"`
+	SequenceNumber    int64           `json:"sequence_number"`
+	CapturedAt        string          `json:"captured_at"`
+	ConsentToken      string          `json:"consent_token"`
+	SDKVersion        string          `json:"sdk_version"`
+	AgentRuntime      string          `json:"agent_runtime"`
+	ClientObserved    *clientObserved `json:"client_observed"`
+	Principal         *identityWire   `json:"principal"`
+	Organization      *identityWire   `json:"organization"`
+	CallID            *string         `json:"call_id"`
+	TransportObserved *string         `json:"transport_observed"`
+	SessionIDOrigin   string          `json:"session_id_origin"`
+	RuntimeMeta       map[string]any  `json:"runtime_meta"`
+	EventType         string          `json:"event_type"`
+	Payload           any             `json:"payload"`
 }
 
 type identityWire struct {

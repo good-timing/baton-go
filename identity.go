@@ -44,9 +44,7 @@ func wireIdentity(id, displayName string, hashed bool) *identityWire {
 	if !usableIdentityText(id) {
 		return nil
 	}
-	if utf8.RuneCountInString(id) > identityCap {
-		id = string([]rune(id)[:identityCap])
-	}
+	id = cutRunes(id, identityCap)
 	form := "raw"
 	if hashed {
 		form = "hashed"
