@@ -156,3 +156,5 @@ Events from this package must be JSON-identical in shape to the Python SDK's, so
 | [goodtiming.ai/docs.html](https://goodtiming.ai/docs.html) | The docs: configuration, what is captured, the Console |
 | [`docs/SPEC.md`](https://github.com/good-timing/baton/blob/main/docs/SPEC.md) | The wire protocol, in the `baton` repo. Applies here too |
 | [`docs/CHARTER.md`](https://github.com/good-timing/baton/blob/main/docs/CHARTER.md) | Why the SDK is thin. Read before architectural changes |
+
+Apache-2.0.
