@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **The HTTP sink sends a `client_report` event (SPEC §11.4.7) with this
+  process's lost-event counts by reason.** It is sent only after a delivery,
+  only when the counts changed, at most once a minute, and never at close. A
+  healthy run sends none. It goes beside the event queue, so it never delays
+  an event or `Close`, and a lost report is not counted. A collector that
+  answers it with 400 or 422 gets no more reports from that sink.
 - **Names with "İ" (U+0130) now match `baton-sdk`.** Go lowercases İ to "i",
   but Python lowercases it to "i" plus a dot mark, which matches no field
   name. Three places follow Python now:

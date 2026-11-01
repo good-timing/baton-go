@@ -249,8 +249,8 @@ func TestSnapshotIsOnTheProcessSession(t *testing.T) {
 	call(t, connectOver(t, &mcp.StreamableClientTransport{Endpoint: serveHTTP(t, server, false, nil)}), "lookup", map[string]any{"name": "a"})
 	snap := ofType(sink.all(), "surface_snapshot")[0]
 	start := ofType(sink.all(), "tool_call_start")[0]
-	if snap.SessionIDOrigin != "minted" || snap.SessionID == start.SessionID || snap.SequenceNumber != 1 {
-		t.Errorf("snapshot session %s (%s) #%d, call session %s", snap.SessionID, snap.SessionIDOrigin, snap.SequenceNumber, start.SessionID)
+	if snap.SessionIDOrigin == nil || *snap.SessionIDOrigin != "minted" || snap.SessionID == start.SessionID || snap.SequenceNumber != 1 {
+		t.Errorf("snapshot session %s (%v) #%d, call session %s", snap.SessionID, snap.SessionIDOrigin, snap.SequenceNumber, start.SessionID)
 	}
 }
 

@@ -1,6 +1,7 @@
 package baton
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,15 +16,25 @@ import (
 )
 
 type fakeConsole struct {
-	mu       sync.Mutex
-	requests []*http.Request
-	events   []map[string]any
-	answer   func(n int) int
-	url      string
+	mu           sync.Mutex
+	requests     []*http.Request
+	events       []map[string]any
+	reports      []map[string]any
+	reportStatus int
+	answer       func(n int) int
+	url          string
 }
 
-// newFakeConsole answers the nth request (from 0) with answer(n), or 202.
-// Its URL is a DSN's origin.
+// reportStatus values that answer no status: the connection is dropped, or
+// the request is held until the client gives up.
+const (
+	reportDrop = -1
+	reportHang = -2
+)
+
+// newFakeConsole answers the nth event request (from 0) with answer(n), or
+// 202. A client_report is kept apart, in reports, and answered with
+// reportStatus, or 202. Its URL is a DSN's origin.
 func newFakeConsole(t *testing.T, answer func(n int) int) *fakeConsole {
 	t.Helper()
 	c := &fakeConsole{answer: answer}
@@ -31,6 +42,20 @@ func newFakeConsole(t *testing.T, answer func(n int) int) *fakeConsole {
 		var event map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&event)
 		c.mu.Lock()
+		if event["event_type"] == "client_report" {
+			c.reports = append(c.reports, event)
+			status := cmp.Or(c.reportStatus, http.StatusAccepted)
+			c.mu.Unlock()
+			switch status {
+			case reportDrop:
+				panic(http.ErrAbortHandler)
+			case reportHang:
+				<-r.Context().Done()
+				return
+			}
+			w.WriteHeader(status)
+			return
+		}
 		n := len(c.requests)
 		c.requests = append(c.requests, r)
 		c.events = append(c.events, event)

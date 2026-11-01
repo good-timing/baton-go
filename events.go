@@ -17,7 +17,7 @@ type Event struct {
 	Organization      *identityWire   `json:"organization"`
 	CallID            *string         `json:"call_id"`
 	TransportObserved *string         `json:"transport_observed"`
-	SessionIDOrigin   string          `json:"session_id_origin"`
+	SessionIDOrigin   *string         `json:"session_id_origin"`
 	RuntimeMeta       map[string]any  `json:"runtime_meta"`
 	EventType         string          `json:"event_type"`
 	Payload           any             `json:"payload"`
@@ -95,4 +95,11 @@ func nonEmpty(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// clientReport is this process's lost-event counts by reason, as running
+// totals (SPEC §11.4.7).
+type clientReport struct {
+	InstanceID string             `json:"instance_id"`
+	Dropped    map[dropReason]int `json:"dropped"`
 }

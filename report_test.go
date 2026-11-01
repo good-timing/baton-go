@@ -1,0 +1,194 @@
+package baton
+
+import (
+	"context"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+)
+
+// reportSink is a sink whose events are answered by statuses in order and
+// whose reports by reportStatus.
+func reportSink(t *testing.T, statuses []int, reportStatus int) (*httpSink, *fakeConsole) {
+	t.Helper()
+	freshDrops(t)
+	console := newFakeConsole(t, func(n int) int { return statuses[n] })
+	console.reportStatus = reportStatus
+	s := fastSink(console)
+	t.Cleanup(func() { s.close(context.Background()) })
+	return s, console
+}
+
+func tenantEvent(n int) Event {
+	e := testEvent(n)
+	e.TenantID, e.VendorID, e.ConsentToken = "t", "v", "ct"
+	return e
+}
+
+func reportIdle(s *httpSink) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.reporting
+}
+
+// sendAll writes n events, letting each send and any report it starts end.
+func sendAll(t *testing.T, s *httpSink, n int) {
+	t.Helper()
+	for i := range n {
+		s.write(tenantEvent(i))
+		waitFor(t, "a send", func() bool { return idle(s) && reportIdle(s) })
+	}
+}
+
+func (c *fakeConsole) reportAt(i int) map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reports[i]
+}
+
+func (c *fakeConsole) reportCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.reports)
+}
+
+func TestADeliveryAfterALossSendsTheTotals(t *testing.T) {
+	captureLogs(t)
+	s, console := reportSink(t, []int{400, 202}, 0)
+	sendAll(t, s, 2)
+	if console.reportCount() != 1 {
+		t.Fatalf("%d reports, want 1", console.reportCount())
+	}
+	r := console.reportAt(0)
+	payload := r["payload"].(map[string]any)
+	dropped := payload["dropped"].(map[string]any)
+	if payload["instance_id"] != processDrops.instanceID || r["session_id"] != processDrops.instanceID ||
+		len(dropped) != 1 || dropped["refused"] != float64(1) {
+		t.Errorf("report %v", r)
+	}
+	if r["tenant_id"] != "t" || r["vendor_id"] != "v" || r["consent_token"] != "ct" || r["sequence_number"].(float64) <= 0 {
+		t.Errorf("envelope %v", r)
+	}
+	for _, absent := range []string{
+		"call_id", "principal", "organization", "client_observed", "transport_observed", "session_id_origin", "runtime_meta",
+	} {
+		if r[absent] != nil {
+			t.Errorf("%s = %v, want null", absent, r[absent])
+		}
+	}
+}
+
+func TestAHealthyRunSendsNoReport(t *testing.T) {
+	s, console := reportSink(t, []int{202, 202, 202}, 0)
+	sendAll(t, s, 3)
+	if console.reportCount() != 0 {
+		t.Errorf("%d reports, want 0", console.reportCount())
+	}
+}
+
+func TestAtMostOneReportAMinute(t *testing.T) {
+	captureLogs(t)
+	s, console := reportSink(t, []int{400, 202, 400, 202}, 0)
+	sendAll(t, s, 4)
+	if console.reportCount() != 1 {
+		t.Errorf("%d reports, want 1", console.reportCount())
+	}
+}
+
+func TestANewLossIsReportedOnceTheIntervalPassed(t *testing.T) {
+	captureLogs(t)
+	s, console := reportSink(t, []int{400, 202, 202, 400, 202}, 0)
+	s.reportEvery = 0
+	sendAll(t, s, 5)
+	if console.reportCount() != 2 {
+		t.Fatalf("%d reports, want 2", console.reportCount())
+	}
+	last := console.reportAt(1)["payload"].(map[string]any)["dropped"].(map[string]any)
+	if last["refused"] != float64(2) {
+		t.Errorf("second report %v", last)
+	}
+}
+
+func TestAFailedReportIsNotCountedAndIsSentAgain(t *testing.T) {
+	for _, status := range []int{500, 401, reportDrop} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			captureLogs(t)
+			s, console := reportSink(t, []int{400, 202, 202}, status)
+			s.reportEvery = 0
+			sendAll(t, s, 3)
+			if console.reportCount() != 2 || processDrops.totals()[dropRefused] != 1 || len(processDrops.totals()) != 1 {
+				t.Errorf("%d reports, counts %v", console.reportCount(), processDrops.totals())
+			}
+		})
+	}
+}
+
+func TestACollectorThatRefusesReportsGetsNoMore(t *testing.T) {
+	for _, status := range []int{400, 422} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			logs := captureLogs(t)
+			s, console := reportSink(t, []int{400, 202, 400, 202}, status)
+			s.reportEvery = 0
+			sendAll(t, s, 4)
+			if console.reportCount() != 1 || processDrops.totals()[dropRefused] != 2 {
+				t.Errorf("%d reports, counts %v", console.reportCount(), processDrops.totals())
+			}
+			if n := strings.Count(logs.String(), "REFUSED"); n != 2 {
+				t.Errorf("%d refusals logged, want 2", n)
+			}
+		})
+	}
+}
+
+func TestOneReportAtATimeAndCloseEndsIt(t *testing.T) {
+	captureLogs(t)
+	s, console := reportSink(t, []int{400, 202, 400, 202}, reportHang)
+	s.reportEvery = 0
+	for i := range 4 {
+		s.write(testEvent(i))
+		waitFor(t, "a send", func() bool { return idle(s) })
+	}
+	if console.reportCount() != 1 || reportIdle(s) {
+		t.Fatalf("%d reports, idle %v", console.reportCount(), reportIdle(s))
+	}
+	start := time.Now()
+	s.close(context.Background())
+	if took := time.Since(start); took > 500*time.Millisecond {
+		t.Errorf("close took %v", took)
+	}
+	// Close ends the report itself, well before the request timeout.
+	for deadline := time.Now().Add(300 * time.Millisecond); !reportIdle(s); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the report outlived close")
+		}
+	}
+	if processDrops.totals()[dropRefused] != 2 || len(processDrops.totals()) != 1 {
+		t.Errorf("counts %v", processDrops.totals())
+	}
+}
+
+func TestAReportThatGetsNoAnswerTimesOut(t *testing.T) {
+	captureLogs(t)
+	s, console := reportSink(t, []int{400, 202, 202}, reportHang)
+	s.reportEvery = 0
+	s.client.Timeout = 20 * time.Millisecond
+	sendAll(t, s, 3)
+	if console.reportCount() != 2 {
+		t.Errorf("%d reports, want 2", console.reportCount())
+	}
+}
+
+func TestNoReportStartsOnceCloseBegan(t *testing.T) {
+	captureLogs(t)
+	s, console := reportSink(t, []int{400}, 0)
+	s.reportEvery = 0
+	sendAll(t, s, 1)
+	s.close(context.Background())
+	s.mu.Lock()
+	due := s.reportDue()
+	s.mu.Unlock()
+	if due != nil || console.reportCount() != 0 {
+		t.Errorf("a report started after close")
+	}
+}

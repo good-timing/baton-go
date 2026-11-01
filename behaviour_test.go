@@ -180,8 +180,8 @@ func TestStatelessHTTP(t *testing.T) {
 				if e.EventType == "surface_snapshot" {
 					continue
 				}
-				if e.TransportObserved == nil || *e.TransportObserved != "http" || e.SessionIDOrigin != c.origin {
-					t.Errorf("%s: transport %v origin %s", e.EventType, e.TransportObserved, e.SessionIDOrigin)
+				if e.TransportObserved == nil || *e.TransportObserved != "http" || e.SessionIDOrigin == nil || *e.SessionIDOrigin != c.origin {
+					t.Errorf("%s: transport %v origin %v", e.EventType, e.TransportObserved, e.SessionIDOrigin)
 				}
 				sessions[e.SessionID] = append(sessions[e.SessionID], e.EventType)
 			}

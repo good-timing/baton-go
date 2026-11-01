@@ -485,7 +485,7 @@ func (b *installed) emit(cc callContext, eventType string, payload any) {
 		Organization:      cc.org,
 		CallID:            nonEmpty(cc.callID),
 		TransportObserved: cc.session.transport,
-		SessionIDOrigin:   cc.session.origin,
+		SessionIDOrigin:   &cc.session.origin,
 		RuntimeMeta:       cc.runtimeMeta,
 		ClientObserved:    cc.client,
 		EventType:         eventType,

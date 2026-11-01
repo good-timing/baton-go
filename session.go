@@ -112,8 +112,20 @@ func connType(conn *mcp.ServerSession) reflect.Type {
 // §3.4 rung 5), so it keeps no entry.
 type sequencer struct {
 	counts *lru[string, int64]
-	mu     sync.Mutex
-	clock  int64
+	clock  microClock
+}
+
+// microClock numbers by the time in microseconds, at least one more each call.
+type microClock struct {
+	mu   sync.Mutex
+	last int64
+}
+
+func (c *microClock) next() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.last = max(c.last+1, time.Now().UnixMicro())
+	return c.last
 }
 
 func newSequencer() *sequencer {
@@ -122,10 +134,7 @@ func newSequencer() *sequencer {
 
 func (s *sequencer) next(sess callSession) int64 {
 	if sess.perRequest() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		s.clock = max(s.clock+1, time.Now().UnixMicro())
-		return s.clock
+		return s.clock.next()
 	}
 	return s.counts.update(sess.id, func(prev int64) int64 {
 		n := prev + 1

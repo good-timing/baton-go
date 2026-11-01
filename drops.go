@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-// dropReason is why an event was not delivered. The names go on the wire in a
-// later release, so they change only with SPEC.
+// dropReason is why an event was not delivered. Wire values (SPEC §11.2 rule
+// 8), so they change only with SPEC.
 type dropReason string
 
 const (
@@ -32,13 +32,15 @@ const recoveryLogEvery = time.Minute
 // event is either delivered or counted here. One per process, like the
 // sequence clock.
 type dropCounts struct {
+	// instanceID names this process in its loss reports (SPEC §11.4.7).
+	instanceID      string
 	mu              sync.Mutex
 	total           map[dropReason]int
 	sinceDelivery   map[dropReason]int
 	lastRecoveryLog time.Time
 }
 
-var processDrops = &dropCounts{total: map[dropReason]int{}, sinceDelivery: map[dropReason]int{}}
+var processDrops = &dropCounts{instanceID: uuid7(), total: map[dropReason]int{}, sinceDelivery: map[dropReason]int{}}
 
 func (d *dropCounts) add(reason dropReason, n int) {
 	if n <= 0 {
