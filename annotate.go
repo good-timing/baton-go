@@ -76,7 +76,7 @@ func (b *installed) emitAnnotation(ctx context.Context, r *mcp.CallToolRequest, 
 		payload.ToolName = b.scrubText(*args.ToolName)
 	}
 	if extra, ok := jsonValue(args.Context).(map[string]any); ok && len(extra) > 0 {
-		payload.Context, _ = b.scrubValue(extra).(map[string]any)
+		payload.Context = asObject(b.scrubValue(extra))
 	}
 	b.emit(b.newCallContext(ctx, r), "annotation", payload)
 }

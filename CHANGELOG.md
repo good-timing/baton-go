@@ -21,8 +21,11 @@
   - With no arguments it is `{}`, as in `baton-sdk`. So are arguments that
     are not an object, such as `[1, 2]`. Before, it was `null` or the array.
   - When the `Scrubber` returns something that cannot be sent as an object,
-    such as a string, it is `{}`, and this is logged once. A map of another
-    Go type, such as `map[string]string`, is still sent.
+    such as a string, it is `{}`, and this is logged once.
+- **`params`, `runtime_meta` (the request's `_meta`) and an annotation's
+  `context` keep a `Scrubber` result that encodes as a JSON object, such as
+  a `map[string]string`.** Before, `runtime_meta` and `context` sent it as
+  `null`.
 
 ## 0.1.0
 

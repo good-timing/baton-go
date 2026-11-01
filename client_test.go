@@ -164,6 +164,55 @@ func TestNamesLowerLikePython(t *testing.T) {
 	}
 }
 
+func TestAScrubbedObjectOfAnotherMapTypeIsKept(t *testing.T) {
+	scrub := func(v any) any {
+		if m, ok := v.(map[string]any); ok && (m["trace"] != nil || m["ticket"] != nil) {
+			return map[string]string{"kept": "[redacted]"}
+		}
+		return v
+	}
+	server, sink := installWithSink(t, Config{Scrubber: scrub, ReportMode: "on"}, addLookup)
+	cs := connect(t, server)
+	callWithMeta(t, cs, mcp.Meta{"trace": "t1"})
+	call(t, cs, slugAnnotateName("spec-vector-generator"), map[string]any{
+		"user_goal": "g", "tool_name": "lookup", "what_happened": "w", "context": map[string]any{"ticket": 7},
+	})
+	want := map[string]any{"kept": "[redacted]"}
+	if got := asJSON(t, ofType(sink.all(), "tool_call_start"))[0]["runtime_meta"]; !reflect.DeepEqual(got, want) {
+		t.Errorf("runtime_meta %v, want %v", got, want)
+	}
+	if got := asJSON(t, ofType(sink.all(), "annotation"))[0]["payload"].(map[string]any)["context"]; !reflect.DeepEqual(got, want) {
+		t.Errorf("context %v, want %v", got, want)
+	}
+}
+
+type panicsWhenEncoded struct{}
+
+func (panicsWhenEncoded) MarshalJSON() ([]byte, error) { panic("cannot encode") }
+
+func TestAScrubbedObjectThatPanicsWhenEncodedCostsOnlyThatValue(t *testing.T) {
+	scrub := func(v any) any {
+		if m, ok := v.(map[string]any); ok && (m["trace"] != nil || m["name"] == "alice" || m["ticket"] != nil) {
+			return panicsWhenEncoded{}
+		}
+		return v
+	}
+	server, sink := installWithSink(t, Config{Scrubber: scrub, ReportMode: "on"}, addLookup)
+	cs := connect(t, server)
+	callWithMeta(t, cs, mcp.Meta{"trace": "t1"})
+	call(t, cs, slugAnnotateName("spec-vector-generator"), map[string]any{
+		"user_goal": "g", "tool_name": "lookup", "what_happened": "w", "context": map[string]any{"ticket": 7},
+	})
+	starts := asJSON(t, ofType(sink.all(), "tool_call_start"))
+	if len(starts) != 1 || starts[0]["runtime_meta"] != nil || !reflect.DeepEqual(starts[0]["payload"].(map[string]any)["params"], map[string]any{}) {
+		t.Fatalf("starts %v", starts)
+	}
+	annotations := asJSON(t, ofType(sink.all(), "annotation"))
+	if len(annotations) != 1 || annotations[0]["payload"].(map[string]any)["context"] != nil {
+		t.Fatalf("annotations %v", annotations)
+	}
+}
+
 func TestCutRunes(t *testing.T) {
 	for _, c := range []struct {
 		in   string

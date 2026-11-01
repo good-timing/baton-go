@@ -236,9 +236,7 @@ func (b *installed) newCallContext(ctx context.Context, r *mcp.CallToolRequest) 
 	if len(r.Params.Meta) > 0 {
 		meta, _ := jsonValue(map[string]any(r.Params.Meta)).(map[string]any)
 		// Rounded before the vendor's scrubber, so NoScrub keeps the rounding.
-		if m, ok := b.scrubOrNil(roundMetaCoordinates(meta), "runtime_meta").(map[string]any); ok {
-			cc.runtimeMeta = m
-		}
+		cc.runtimeMeta = asObject(b.scrubOrNil(roundMetaCoordinates(meta), "runtime_meta"))
 	}
 	return cc
 }
@@ -434,10 +432,7 @@ func (b *installed) scrubParams(params any) map[string]any {
 		params = map[string]any{}
 	}
 	out := b.scrubOrNil(params, "params")
-	if m, ok := out.(map[string]any); ok && m != nil {
-		return m
-	}
-	if m, ok := jsonValue(out).(map[string]any); ok {
+	if m := asObject(out); m != nil {
 		return m
 	}
 	if out != nil {
@@ -446,6 +441,21 @@ func (b *installed) scrubParams(params any) map[string]any {
 		})
 	}
 	return map[string]any{}
+}
+
+// asObject keeps a Scrubber's result that encodes as a JSON object, whatever
+// its Go type (TestAScrubbedObjectOfAnotherMapTypeIsKept). One whose encoding
+// panics is nil (TestAScrubbedObjectThatPanicsWhenEncodedCostsOnlyThatValue).
+func asObject(v any) map[string]any {
+	switch v := v.(type) {
+	case map[string]any:
+		return v
+	case nil, string:
+		return nil
+	}
+	defer func() { _ = recover() }()
+	m, _ := jsonValue(v).(map[string]any)
+	return m
 }
 
 func (b *installed) scrubValue(v any) any {
