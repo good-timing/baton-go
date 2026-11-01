@@ -1,6 +1,6 @@
 // Package baton sends what happens on a go-sdk MCP server's tools to Baton.
 //
-//	handle, err := baton.Install(server, baton.Config{DSN: "https://baton_pk_...@ingest.goodtiming.ai/ten_.../my-server"})
+//	handle, err := baton.Install(server, baton.Config{DSN: "https://baton_pk_...@baton.goodtiming.ai/ten_.../my-server"})
 //	defer handle.Close(context.Background())
 package baton
 
@@ -94,8 +94,13 @@ type installed struct {
 
 // Install adds Baton to server. Call it after the vendor's own AddTool lines;
 // tools added later are covered too. Call it once per server: each Install
-// starts its own sender, which runs until Close.
+// starts its own sender, which runs until Close. With BATON_DISABLED=1 in the
+// environment, Install adds nothing and checks nothing, not even server or cfg.
 func Install(server *mcp.Server, cfg Config) (*Handle, error) {
+	if captureDisabled() {
+		slog.Info("baton: BATON_DISABLED is set, so Baton is not installed and records nothing")
+		return &Handle{}, nil
+	}
 	if server == nil {
 		return nil, errors.New("baton: Install needs a server")
 	}
@@ -132,6 +137,17 @@ func (b *installed) install(server *mcp.Server, openSink func() sink) (*Handle, 
 	b.sink = openSink()
 	server.AddReceivingMiddleware(b.middleware)
 	return &Handle{b: b}, nil
+}
+
+// captureDisabled reads the off switch with baton-sdk's values. Install checks
+// nothing else when it is on, so the switch cannot stop the vendor's server
+// (TestTheOffSwitchInstallsNothingAndChecksNothing).
+func captureDisabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("BATON_DISABLED"))) {
+	case "", "0", "false", "no", "off":
+		return false
+	}
+	return true
 }
 
 func oneOf(field, value string, allowed ...string) error {

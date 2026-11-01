@@ -6,7 +6,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
@@ -279,5 +281,42 @@ func TestScrubberFixedSets(t *testing.T) {
 	got := DefaultScrubber(map[string]any{"Password": "hunter2", "n": 1})
 	if !reflect.DeepEqual(got, map[string]any{"Password": "[REDACTED:field-password]", "n": 1}) {
 		t.Errorf("field rule: %v", got)
+	}
+}
+
+func TestTheOffSwitchInstallsNothingAndChecksNothing(t *testing.T) {
+	for _, v := range []string{"1", "true", "yes", " ON "} {
+		t.Setenv("BATON_DISABLED", v)
+		if handle, err := Install(nil, Config{DSN: "not a dsn", ResultCapture: "bogus"}); err != nil || handle == nil {
+			t.Errorf("BATON_DISABLED=%q: handle %v, err %v", v, handle, err)
+		}
+		server := newVectorServer()
+		addLookup(server)
+		handle, err := Install(server, Config{DSN: testDSN, ReportMode: "on"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle.Close(context.Background())
+		cs := connect(t, server)
+		if got := cs.InitializeResult().Instructions; got != "" {
+			t.Errorf("BATON_DISABLED=%q added instructions: %q", v, got)
+		}
+		res, err := cs.ListTools(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Tools) != 1 || strings.Contains(string(mustJSON(t, res.Tools[0].InputSchema)), userGoalParam) {
+			t.Errorf("BATON_DISABLED=%q changed the tools: %s", v, mustJSON(t, res.Tools))
+		}
+	}
+	t.Setenv("BATON_DISABLED", "")
+	os.Unsetenv("BATON_DISABLED")
+	for _, v := range []string{"unset", "", "0", "false", "no", "off"} {
+		if v != "unset" {
+			t.Setenv("BATON_DISABLED", v)
+		}
+		if _, err := Install(newVectorServer(), Config{DSN: "not a dsn"}); err == nil {
+			t.Errorf("BATON_DISABLED=%q switched capture off", v)
+		}
 	}
 }
