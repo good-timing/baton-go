@@ -20,9 +20,10 @@ type collectorSettings struct {
 	FlushIntervalMS  *int `json:"flush_interval_ms"`
 }
 
+func ms(n int) time.Duration { return time.Duration(n) * time.Millisecond }
+
 // apply gives s these settings; one that is absent keeps the sink's default.
 func (c collectorSettings) apply(s *httpSink) {
-	ms := func(n int) time.Duration { return time.Duration(n) * time.Millisecond }
 	s.client.Timeout = ms(c.RequestTimeoutMS)
 	s.budget = ms(c.ShutdownBudgetMS)
 	s.backoff = ms(c.BackoffBaseMS)

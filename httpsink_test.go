@@ -32,6 +32,7 @@ type fakeConsole struct {
 	reportStatus int
 	answer       func(n int) int
 	refuse       func(event map[string]any) bool
+	refuseCode   string
 	noBatch      int
 	maxEvents    int
 	retryAfter   string
@@ -47,7 +48,7 @@ const (
 
 // newFakeConsole answers the nth request carrying events (from 0) with
 // answer(n), or 2xx. A 2xx on the batch path answers each event accepted, or
-// refused where refuse says so. A request that carries only client_reports
+// refused with refuseCode, or payload_malformed, where refuse says so. A request that carries only client_reports
 // is kept apart, in reports, and answered with reportStatus, or 2xx. The
 // batch path answers noBatch when set, and 413 to a body over the cap or to
 // more than maxEvents events when that is set. A 429 carries retryAfter.
@@ -127,7 +128,7 @@ func newFakeConsole(t *testing.T, answer func(n int) int) *fakeConsole {
 			result := map[string]any{"event_id": e["event_id"], "status": "accepted"}
 			if c.refuse != nil && c.refuse(e) {
 				result["status"] = "refused"
-				result["error"] = map[string]any{"code": "payload_malformed", "message": "refused"}
+				result["error"] = map[string]any{"code": cmp.Or(c.refuseCode, "payload_malformed"), "message": "refused"}
 			}
 			results = append(results, result)
 		}
@@ -654,7 +655,7 @@ func (c *fakeConsole) sequences() []float64 {
 	return out
 }
 
-// batchingSink waits for the count or byte cap, Flush or Close, never the timer.
+// batchingSink waits for the count or byte cap, flush or close, never the timer.
 func batchingSink(t *testing.T, c *fakeConsole) *httpSink {
 	s := fastSink(t, c)
 	s.flushEvery = time.Hour

@@ -104,7 +104,6 @@ func receivedBy(t *testing.T, url, mode, query string) received {
 func TestTheSinkKeepsItsPromisesAgainstABrokenCollector(t *testing.T) {
 	var spec collectorSpec
 	readScenarios(t, "scenarios.json", &spec)
-	ms := func(n int) time.Duration { return time.Duration(n) * time.Millisecond }
 	for _, sc := range spec.Scenarios {
 		t.Run(sc.Name, func(t *testing.T) {
 			logs := captureLogs(t)

@@ -49,7 +49,6 @@ func warnings(logs *testLog) int {
 func TestShutdownScenarios(t *testing.T) {
 	var spec shutdownSpec
 	readScenarios(t, "shutdown.json", &spec)
-	ms := func(n int) time.Duration { return time.Duration(n) * time.Millisecond }
 	for _, sc := range spec.Scenarios {
 		t.Run(sc.Name, func(t *testing.T) {
 			if why, ok := shutdownNotRun[sc.Name]; ok {

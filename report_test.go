@@ -3,6 +3,7 @@ package baton
 import (
 	"context"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -137,15 +138,17 @@ func TestAFailedReportIsNotCountedAndIsSentAgain(t *testing.T) {
 	}
 }
 
-func TestACollectorThatRefusesReportsGetsNoMore(t *testing.T) {
+// A whole-batch 400 or 422 stops reports only on the one-event path
+// (TestACollectorWithoutTheBatchEndpointCanStillRefuseReports).
+func TestAWholeBatchRefusalOfALoneReportDoesNotStopReports(t *testing.T) {
 	for _, status := range []int{400, 422} {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {
 			logs := captureLogs(t)
 			s, console := reportSink(t, []int{400, 202, 400, 202}, status)
 			s.reportEvery = 0
 			sendAll(t, s, 4)
-			if console.reportCount() != 1 || processDrops.totals()[dropRefused] != 2 {
-				t.Errorf("%d reports, counts %v", console.reportCount(), processDrops.totals())
+			if console.reportCount() != 2 || processDrops.totals()[dropRefused] != 2 {
+				t.Errorf("%d reports, counts %v; want 2 and 2 refused", console.reportCount(), processDrops.totals())
 			}
 			if n := strings.Count(logs.String(), "REFUSED"); n != 2 {
 				t.Errorf("%d refusals logged, want 2", n)
@@ -154,17 +157,68 @@ func TestACollectorThatRefusesReportsGetsNoMore(t *testing.T) {
 	}
 }
 
-func TestAReportRefusedInABatchStopsReports(t *testing.T) {
+// A report refused for another reason is sent again after the next delivery.
+func TestAReportRefusedInABatchStopsReportsOnlyAsMalformed(t *testing.T) {
+	for code, reports := range map[string]int{"payload_malformed": 1, "quota_exhausted": 3} {
+		t.Run(code, func(t *testing.T) {
+			captureLogs(t)
+			s, console := reportSink(t, []int{400, 202, 202, 400, 202}, 0)
+			s.reportEvery = 0
+			console.refuse = func(e map[string]any) bool { return e["event_type"] == "client_report" }
+			console.refuseCode = code
+			sendAll(t, s, 1)
+			writeBesideAReport(t, s, console)
+			s.flushEvery = 0
+			sendAll(t, s, 2)
+			if console.count() != 5 || console.reportCount() != reports {
+				t.Errorf("%d requests, %d reports; want 5, %d", console.count(), console.reportCount(), reports)
+			}
+		})
+	}
+}
+
+// Another event in the batch may be what the collector refused.
+func TestAWholeBatchRefusalOfEventsWithAReportDoesNotStopReports(t *testing.T) {
 	captureLogs(t)
-	s, console := reportSink(t, []int{400, 202, 202, 400, 202}, 0)
+	s, console := reportSink(t, []int{400, 202, 400, 400, 202}, 0)
 	s.reportEvery = 0
-	console.refuse = func(e map[string]any) bool { return e["event_type"] == "client_report" }
 	sendAll(t, s, 1)
 	writeBesideAReport(t, s, console)
 	s.flushEvery = 0
 	sendAll(t, s, 2)
-	if console.count() != 5 || console.reportCount() != 1 || console.reportsAlone != 0 {
-		t.Errorf("%d requests, %d reports, %d alone; want 5, 1, 0", console.count(), console.reportCount(), console.reportsAlone)
+	if console.reportCount() != 2 || console.reportsAlone != 1 {
+		t.Errorf("%d reports, %d alone; want 2, 1", console.reportCount(), console.reportsAlone)
+	}
+}
+
+func TestAReportRidesABatchWhileMoreEventsWait(t *testing.T) {
+	captureLogs(t)
+	s, console := reportSink(t, []int{400, 202, 202, 202}, 0)
+	sendAll(t, s, 1)
+	s.flushEvery = time.Second
+	s.write(tenantEvent(1))
+	waitFor(t, "the delivery", func() bool { return !reportIdle(s) })
+	// Two of these fill a batch by bytes, so the third waits for the next.
+	for i := range 3 {
+		s.write(bigEvent(2+i, 400_000))
+	}
+	waitFor(t, "both batches", func() bool { return console.count() == 4 && idle(s) })
+	if got := console.batchSizes(); !slices.Equal(got, []int{1, 1, 3, 1}) {
+		t.Errorf("entries per request %v, want [1 1 3 1]: the report in the first batch with room", got)
+	}
+}
+
+func TestABatchKeptForALaterTryKeepsItsReport(t *testing.T) {
+	captureLogs(t)
+	s, console := reportSink(t, []int{400, 202, 500, 500, 500, 500, 202}, 0)
+	sendAll(t, s, 1)
+	s.flushEvery = 200 * time.Millisecond
+	s.write(tenantEvent(1))
+	waitFor(t, "the delivery", func() bool { return !reportIdle(s) })
+	s.write(tenantEvent(2))
+	waitFor(t, "the retry", func() bool { return console.count() == 7 && idle(s) })
+	if got := console.batchSizes(); got[6] != 2 || console.reportIDs() != 1 {
+		t.Errorf("entries per request %v, %d report ids; want the retry to carry the one report", got, console.reportIDs())
 	}
 }
 
@@ -246,5 +300,37 @@ func TestAReportRidesTheNextBatch(t *testing.T) {
 	writeBesideAReport(t, s, console)
 	if console.count() != 3 || console.reportCount() != 1 || console.reportsAlone != 0 {
 		t.Errorf("%d requests, %d reports, %d alone; want 3, 1, 0", console.count(), console.reportCount(), console.reportsAlone)
+	}
+}
+
+func TestABatchKeptAfterCloseBeganLosesItsReport(t *testing.T) {
+	captureLogs(t)
+	release := make(chan struct{})
+	s, console := reportSink(t, nil, 0)
+	console.answer = func(n int) int {
+		switch {
+		case n == 0:
+			return 400
+		case n == 2:
+			<-release
+		}
+		if n >= 2 && n <= 5 {
+			return 500
+		}
+		return 202
+	}
+	sendAll(t, s, 1)
+	s.flushEvery = 200 * time.Millisecond
+	s.write(tenantEvent(1))
+	waitFor(t, "the delivery", func() bool { return !reportIdle(s) })
+	s.write(tenantEvent(2))
+	waitFor(t, "the batch with the report", func() bool { return console.count() == 3 })
+	closed := make(chan struct{})
+	go func() { s.close(context.Background()); close(closed) }()
+	waitFor(t, "close", func() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.closed })
+	close(release)
+	<-closed
+	if got := console.batchSizes(); len(got) != 7 || got[6] != 1 {
+		t.Errorf("entries per request %v; want the last try at close without the report", got)
 	}
 }

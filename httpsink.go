@@ -173,12 +173,27 @@ func (s *httpSink) push(e Event) bool {
 }
 
 // putBack returns a failed batch, which is older than everything queued, to
-// the front. When that overfills the queue, the batch's oldest are the ones
-// dropped. It returns how many it dropped. The caller holds s.mu.
+// the front, and its report to s.report. When that overfills the queue, the
+// batch's oldest are the ones dropped. It returns how many it dropped. The
+// caller holds s.mu.
 func (s *httpSink) putBack(batch []*queued) int {
-	over := max(0, len(s.queue)+len(batch)-bufferCap)
+	events := make([]*queued, 0, len(batch))
+	var report *queued
+	for _, q := range batch {
+		if q.isReport {
+			report = q
+		} else {
+			events = append(events, q)
+		}
+	}
+	// A report that failed alone is not kept: retrying it would count toward
+	// the breaker, which pauses the events.
+	if report != nil && len(events) > 0 && !s.closed {
+		s.report = report
+	}
+	over := max(0, len(s.queue)+len(events)-bufferCap)
 	processDrops.add(dropBufferFull, over)
-	kept := batch[over:]
+	kept := events[over:]
 	s.queue = slices.Insert(s.queue, 0, kept...)
 	s.head -= len(kept)
 	for _, q := range kept {
@@ -261,7 +276,7 @@ func (s *httpSink) drain(force bool) time.Duration {
 		}
 		s.mu.Unlock()
 		if stopped {
-			processDrops.add(dropUnsentAtClose, len(kept))
+			processDrops.add(dropUnsentAtClose, countEvents(kept))
 		}
 		if dropped > 0 {
 			s.warnOverflow()
@@ -273,7 +288,7 @@ func (s *httpSink) drain(force bool) time.Duration {
 			continue
 		}
 		if time.Now().Before(s.rateLimited) {
-			return time.Until(s.rateLimited)
+			continue
 		}
 		s.failures++
 		if s.failures >= breakerThreshold {
@@ -358,10 +373,11 @@ take:
 		}
 		s.popFront()
 	}
-	if report := s.report; report != nil && len(s.queue) == 0 && len(batch) < batchCap {
-		if report.body == nil {
+	if report := s.report; report != nil {
+		switch {
+		case report.body == nil:
 			s.report = nil
-		} else if size+report.cost() <= batchBytes {
+		case len(batch) < batchCap && size+report.cost() <= batchBytes:
 			s.report = nil
 			batch = append(batch, report)
 		}
@@ -391,20 +407,26 @@ func (s *httpSink) encode(q *queued) {
 	}
 }
 
-// eventsOf leaves out the loss report: a report is never counted as lost
-// (SPEC §11.4.7), nor kept for a later batch.
-func eventsOf(batch []*queued) []*queued {
-	return slices.DeleteFunc(slices.Clone(batch), func(q *queued) bool { return q.isReport })
+// countEvents leaves out the loss report: a report is never counted as lost
+// (SPEC §11.4.7).
+func countEvents(batch []*queued) int {
+	n := 0
+	for _, q := range batch {
+		if !q.isReport {
+			n++
+		}
+	}
+	return n
 }
 
 // deliver sends batch, splitting it on 413 and switching to one event per
 // request on the batch path's 404 or 405. On a transient failure it returns
-// the events it did not deliver, in order.
+// what it did not deliver, in order.
 func (s *httpSink) deliver(batch []*queued) (kept []*queued, failed bool) {
 	if s.single && len(batch) > 1 {
 		for i := range batch {
 			if _, failed := s.deliver(batch[i : i+1]); failed {
-				return eventsOf(batch[i:]), true
+				return batch[i:], true
 			}
 		}
 		return nil, false
@@ -412,7 +434,7 @@ func (s *httpSink) deliver(batch []*queued) (kept []*queued, failed bool) {
 	status, answer, ok := s.post(batch)
 	switch {
 	case !ok:
-		return eventsOf(batch), true
+		return batch, true
 	case status >= 200 && status < 300:
 		s.settle(batch, answer)
 	case !s.single && (status == http.StatusNotFound || status == http.StatusMethodNotAllowed):
@@ -422,7 +444,7 @@ func (s *httpSink) deliver(batch []*queued) (kept []*queued, failed bool) {
 	case status == http.StatusRequestEntityTooLarge && len(batch) > 1:
 		half := len(batch) / 2
 		if kept, failed := s.deliver(batch[:half]); failed {
-			return append(kept, eventsOf(batch[half:])...), true
+			return slices.Concat(kept, batch[half:]), true
 		}
 		return s.deliver(batch[half:])
 	default:
@@ -478,7 +500,9 @@ func (s *httpSink) settle(batch []*queued, answer []byte) {
 		case q.isReport:
 			s.mu.Lock()
 			if isRefused {
-				s.reportsRefused = true
+				// A collector that predates client_report refuses it this way;
+				// another code, such as quota_exhausted, is about this batch.
+				s.reportsRefused = s.reportsRefused || refusedCode == "payload_malformed"
 			} else {
 				s.reportedSum = max(s.reportedSum, q.reportSum)
 			}
@@ -507,15 +531,16 @@ func warnRefused(n int, args ...any) {
 
 // refuse drops a batch the collector refused as a whole.
 func (s *httpSink) refuse(batch []*queued, status int, answer []byte) {
-	events := eventsOf(batch)
-	if len(events) < len(batch) && (status == http.StatusBadRequest || status == http.StatusUnprocessableEntity) {
-		// A collector that predates client_report refuses it this way.
+	alone := s.single && len(batch) == 1 && batch[0].isReport
+	if alone && (status == http.StatusBadRequest || status == http.StatusUnprocessableEntity) {
+		// A collector that predates client_report refuses it this way. In a
+		// batch, another event may be what the collector refused.
 		s.mu.Lock()
 		s.reportsRefused = true
 		s.mu.Unlock()
 	}
-	if len(events) > 0 {
-		warnRefused(len(events), "status", status,
+	if n := countEvents(batch); n > 0 {
+		warnRefused(n, "status", status,
 			"body", strings.ToValidUTF8(string(answer[:min(len(answer), refusalBodyCap)]), "?"))
 	}
 }
@@ -587,12 +612,7 @@ func (s *httpSink) post(batch []*queued) (status int, answer []byte, ok bool) {
 	url, body := s.origin+"/v0/events", batch[0].body
 	if !s.single {
 		url = s.origin + "/v0/events/batch"
-		size := batchFrame - 1
-		for _, q := range batch {
-			size += q.cost()
-		}
 		var b bytes.Buffer
-		b.Grow(size)
 		b.WriteString(batchOpen)
 		for i, q := range batch {
 			if i > 0 {
@@ -728,7 +748,7 @@ func (s *httpSink) close(ctx context.Context) {
 		s.client.CloseIdleConnections()
 		s.mu.Lock()
 		unsent = len(s.queue)
-		inFlight := len(eventsOf(s.inFlight))
+		inFlight := countEvents(s.inFlight)
 		s.mu.Unlock()
 		// Those being sent are counted by drain, when their send ends.
 		processDrops.add(dropUnsentAtClose, unsent)
