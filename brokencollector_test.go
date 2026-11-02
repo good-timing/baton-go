@@ -72,11 +72,19 @@ func startCollector(t *testing.T, sc collectorScenario) string {
 
 type received struct {
 	Accepted []int
-	Events   []struct {
-		EventType string `json:"event_type"`
-	}
+	Events   []collectedEvent
 	Requests int
 	Reports  int
+}
+
+type collectedEvent struct {
+	EventType         string          `json:"event_type"`
+	SessionID         string          `json:"session_id"`
+	SequenceNumber    int64           `json:"sequence_number"`
+	SessionIDOrigin   *string         `json:"session_id_origin"`
+	TransportObserved *string         `json:"transport_observed"`
+	CallID            string          `json:"call_id"`
+	Payload           json.RawMessage `json:"payload"`
 }
 
 func receivedBy(t *testing.T, url, mode, query string) received {

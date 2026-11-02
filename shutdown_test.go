@@ -81,18 +81,45 @@ func (l *lockedLog) String() string {
 	return l.buf.String()
 }
 
-func TestShutdownScenarios(t *testing.T) {
+// installEcho adds the echo tool to server and installs Baton on it with
+// default settings, sending to the collector at url.
+func installEcho(t *testing.T, server *mcp.Server, url string, set func(*httpSink)) (*mcp.Server, *Handle, *httpSink) {
+	t.Helper()
+	mcp.AddTool(server, &mcp.Tool{Name: "echo"}, echo)
+	b, err := configure(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.vendorID, b.tenantID = "acme", "acme"
+	var sent *httpSink
+	handle, err := b.install(server, func() sink {
+		sent = newHTTPSink(url, testKey)
+		set(sent)
+		return sent
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return server, handle, sent
+}
+
+func readScenarios(t *testing.T, name string, into any) {
+	t.Helper()
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 is missing; the fake collector needs it")
 	}
-	raw, err := os.ReadFile(collectorDir + "/shutdown.json")
+	raw, err := os.ReadFile(collectorDir + "/" + name)
 	if err != nil {
 		t.Fatalf("is the baton-spec submodule checked out? %v", err)
 	}
-	var spec shutdownSpec
-	if err := json.Unmarshal(raw, &spec); err != nil {
+	if err := json.Unmarshal(raw, into); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestShutdownScenarios(t *testing.T) {
+	var spec shutdownSpec
+	readScenarios(t, "shutdown.json", &spec)
 	ms := func(n int) time.Duration { return time.Duration(n) * time.Millisecond }
 	closeLimit := ms(spec.Settings.ShutdownBudgetMS + spec.Limits.CloseMarginMS)
 	for _, sc := range spec.Scenarios {
@@ -104,24 +131,11 @@ func TestShutdownScenarios(t *testing.T) {
 			logs := &lockedLog{}
 			slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
 			url := startCollector(t, collectorScenario{Mode: sc.Mode, DelayMS: sc.DelayMS})
-			var sent *httpSink
-			server := newVectorServer()
-			mcp.AddTool(server, &mcp.Tool{Name: "echo"}, echo)
-			b, err := configure(Config{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			b.vendorID, b.tenantID = "acme", "acme"
-			handle, err := b.install(server, func() sink {
-				sent = newHTTPSink(url, testKey)
-				sent.client.Timeout = ms(spec.Settings.RequestTimeoutMS)
-				sent.budget = ms(spec.Settings.ShutdownBudgetMS)
-				sent.backoff = ms(spec.Settings.BackoffBaseMS)
-				return sent
+			server, handle, sent := installEcho(t, mcp.NewServer(&mcp.Implementation{Name: "echo-server"}, nil), url, func(s *httpSink) {
+				s.client.Timeout = ms(spec.Settings.RequestTimeoutMS)
+				s.budget = ms(spec.Settings.ShutdownBudgetMS)
+				s.backoff = ms(spec.Settings.BackoffBaseMS)
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
 			cs := connect(t, server)
 			closeWithin := func() {
 				started := time.Now()
