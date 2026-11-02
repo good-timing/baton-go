@@ -124,55 +124,55 @@ func (c *fakeConsole) reportIDs() int {
 	return len(ids)
 }
 
-// sendBesideAFailedReport delivers an event whose report then fails alone,
-// and returns when the next event's batch is done.
-func sendBesideAFailedReport(t *testing.T, s *httpSink, console *fakeConsole) {
-	t.Helper()
-	sendAll(t, s, 1)
-	s.write(tenantEvent(1))
-	waitFor(t, "the report's tries", func() bool { return console.reportCount() == maxRetries+1 && idle(s) })
-	time.Sleep(50 * time.Millisecond)
-	if console.reportCount() != maxRetries+1 {
-		t.Fatalf("%d tries of the report alone, want %d: a kept report waits for an event", console.reportCount(), maxRetries+1)
-	}
-	s.write(tenantEvent(2))
-	waitFor(t, "the next batch", func() bool { return console.eventCount() == 3 && idle(s) && reportIdle(s) })
-}
-
-func TestAReportThatFailsAloneRidesTheNextBatch(t *testing.T) {
-	for _, status := range []int{500, reportDrop} {
+func TestAFailedReportIsNotCountedAndIsSentAgain(t *testing.T) {
+	for _, status := range []int{500, 401, reportDrop} {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {
 			captureLogs(t)
 			s, console := reportSink(t, []int{400, 202, 202}, status)
-			sendBesideAFailedReport(t, s, console)
-			if console.reportIDs() != 1 || console.batchSizes()[2] != 2 || len(processDrops.totals()) != 1 {
-				t.Errorf("%d report ids, entries per request %v, counts %v; want the one report beside the event",
-					console.reportIDs(), console.batchSizes(), processDrops.totals())
+			s.reportEvery = 0
+			sendAll(t, s, 3)
+			if console.reportIDs() != 2 || processDrops.totals()[dropRefused] != 1 || len(processDrops.totals()) != 1 {
+				t.Errorf("%d reports, counts %v", console.reportIDs(), processDrops.totals())
 			}
 		})
 	}
 }
 
-func TestAReportRefusedAloneIsNotCountedAndIsSentAgain(t *testing.T) {
-	captureLogs(t)
-	s, console := reportSink(t, []int{400, 202, 202}, 401)
-	s.reportEvery = 0
-	sendAll(t, s, 3)
-	if console.reportIDs() != 2 || processDrops.totals()[dropRefused] != 1 || len(processDrops.totals()) != 1 {
-		t.Errorf("%d reports, counts %v", console.reportIDs(), processDrops.totals())
+// On the one-event path a report always goes alone; one that fails must not
+// pause events the collector accepts.
+func TestALoneReportThatFailsDoesNotPauseEvents(t *testing.T) {
+	for _, status := range []int{500, reportHang} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			captureLogs(t)
+			statuses := make([]int, 2*breakerThreshold)
+			statuses[0] = 400
+			for i := 1; i < len(statuses); i++ {
+				statuses[i] = 202
+			}
+			s, console := reportSink(t, statuses, status)
+			console.noBatch = http.StatusNotFound
+			s.client.Timeout = 20 * time.Millisecond
+			for n := range 2 * breakerThreshold {
+				s.write(tenantEvent(n))
+				waitFor(t, "the event", func() bool { return console.eventCount() == n+1 && idle(s) })
+			}
+		})
 	}
 }
 
-func TestCloseDropsAReportThatFailedAlone(t *testing.T) {
+// A report due when close begins is not sent (SPEC §11.4.7), even beside the
+// events close sends.
+func TestCloseDropsAReportThatIsDue(t *testing.T) {
 	captureLogs(t)
-	s, console := reportSink(t, []int{400, 202}, 500)
+	s, console := reportSink(t, []int{400, 202, 202}, 0)
 	sendAll(t, s, 1)
+	s.flushEvery = 200 * time.Millisecond
 	s.write(tenantEvent(1))
-	waitFor(t, "the report's tries", func() bool { return console.reportCount() == maxRetries+1 && idle(s) })
-	start := time.Now()
+	waitFor(t, "the delivery", func() bool { return !reportIdle(s) })
+	s.write(tenantEvent(2))
 	s.close(context.Background())
-	if took := time.Since(start); took > 500*time.Millisecond || console.reportCount() != maxRetries+1 {
-		t.Errorf("close took %v, %d report tries", took, console.reportCount())
+	if console.eventCount() != 3 || console.reportCount() != 0 {
+		t.Errorf("%d events, %d reports sent at close; want 3, 0", console.eventCount(), console.reportCount())
 	}
 }
 
@@ -297,10 +297,11 @@ func TestCloseEndsAReportBeingSent(t *testing.T) {
 func TestAReportThatGetsNoAnswerTimesOut(t *testing.T) {
 	captureLogs(t)
 	s, console := reportSink(t, []int{400, 202, 202}, reportHang)
+	s.reportEvery = 0
 	s.client.Timeout = 20 * time.Millisecond
-	sendBesideAFailedReport(t, s, console)
-	if console.reportIDs() != 1 || console.batchSizes()[2] != 2 {
-		t.Errorf("%d report ids, entries per request %v", console.reportIDs(), console.batchSizes())
+	sendAll(t, s, 3)
+	if console.reportIDs() != 2 {
+		t.Errorf("%d reports, want 2", console.reportIDs())
 	}
 }
 
