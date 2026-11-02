@@ -1115,3 +1115,42 @@ func TestAnEventDroppedWhileItIsEncodedLeavesNoBytesBehind(t *testing.T) {
 	}
 	s.close(context.Background())
 }
+
+func TestARefusedResultWithAnUnreadableErrorIsStillRefused(t *testing.T) {
+	captureLogs(t)
+	url, _ := answering(t, func(_ int, events []map[string]any, w http.ResponseWriter) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{
+			map[string]any{"event_id": events[0]["event_id"], "status": "refused", "error": "bad"},
+			// A non-string event_id names no event, so event 1 counts as delivered.
+			map[string]any{"event_id": 7, "status": "refused"},
+		}})
+	})
+	s := newHTTPSink(url, testKey)
+	s.flushEvery = time.Hour
+	for n := range 2 {
+		s.write(testEvent(n))
+	}
+	s.close(context.Background())
+	if got := processDrops.totals(); !maps.Equal(got, map[dropReason]int{dropRefused: 1}) {
+		t.Errorf("counts %v, want refused 1", got)
+	}
+}
+
+func TestTheByteCapCountsEveryByteOfTheBody(t *testing.T) {
+	for over, want := range map[int][]int{0: {2}, 1: {1, 1}} {
+		t.Run(strconv.Itoa(over), func(t *testing.T) {
+			captureLogs(t)
+			console := newFakeConsole(t, nil)
+			s := batchingSink(console)
+			// The body of two events is the frame, both events and one comma.
+			bare, _ := encodeEvent(bigEvent(1, 0))
+			payload := batchBytes + over - batchFrame - 1 - 2*len(bare)
+			s.write(bigEvent(1, payload/2))
+			s.write(bigEvent(2, payload-payload/2))
+			s.close(context.Background())
+			if got := console.batchSizes(); !slices.Equal(got, want) || slices.Max(console.sizes) > batchBytes {
+				t.Errorf("batches %v of %v bytes, want %v", got, console.sizes, want)
+			}
+		})
+	}
+}

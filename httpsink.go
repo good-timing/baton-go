@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -48,14 +49,15 @@ var reportSequence microClock
 type queued struct {
 	Event
 	written time.Time
-	// Set by the sending goroutine, so encoding never runs on the vendor's
-	// call. cost is the bytes the event adds to a batch body, with its comma.
+	// Set by the sending goroutine, so encoding never runs on the vendor's call.
 	body      []byte
 	encodeErr error
-	cost      int
 	isReport  bool
 	reportSum int
 }
+
+// cost is the bytes q adds to a batch body, with its comma.
+func (q *queued) cost() int { return 1 + len(q.body) }
 
 // httpSink posts batches of events from a single goroutine, one request at a
 // time, so a slow or broken console never slows the vendor's tool calls.
@@ -180,7 +182,7 @@ func (s *httpSink) putBack(batch []*queued) int {
 	s.queue = slices.Insert(s.queue, 0, kept...)
 	s.head -= len(kept)
 	for _, q := range kept {
-		s.sizedBytes += q.cost
+		s.sizedBytes += q.cost()
 	}
 	return over
 }
@@ -192,7 +194,7 @@ func (s *httpSink) popFront() *queued {
 	s.queue[0] = nil
 	s.queue = s.queue[1:]
 	if s.head < s.sized {
-		s.sizedBytes -= q.cost
+		s.sizedBytes -= q.cost()
 	}
 	s.head++
 	s.sized = max(s.sized, s.head)
@@ -286,15 +288,19 @@ func (s *httpSink) drain(force bool) time.Duration {
 }
 
 // sizeNew encodes the queued events not sized yet, among the first batchCap,
-// outside s.mu, and adds their cost to sizedBytes.
+// and any due report, outside s.mu, and adds the events' cost to sizedBytes.
 func (s *httpSink) sizeNew() {
 	s.mu.Lock()
 	from := s.sized
+	report := s.report
 	var todo []*queued
 	if lo, hi := from-s.head, min(len(s.queue), batchCap); lo < hi {
 		todo = slices.Clone(s.queue[lo:hi])
 	}
 	s.mu.Unlock()
+	if report != nil {
+		s.encode(report)
+	}
 	if len(todo) == 0 {
 		return
 	}
@@ -305,7 +311,7 @@ func (s *httpSink) sizeNew() {
 	// Write may have dropped some meanwhile; those were never in sizedBytes.
 	for i, q := range todo {
 		if from+i >= s.head {
-			s.sizedBytes += q.cost
+			s.sizedBytes += q.cost()
 		}
 	}
 	s.sized = max(s.sized, from+len(todo))
@@ -342,21 +348,20 @@ take:
 			break take // past the sized ones; the next batch takes it
 		case q.body == nil:
 			unencodable = append(unencodable, q)
-		case batchFrame-1+q.cost > batchBytes:
+		case batchFrame-1+q.cost() > batchBytes:
 			oversize = append(oversize, q)
-		case size+q.cost > batchBytes:
+		case size+q.cost() > batchBytes:
 			break take
 		default:
 			batch = append(batch, q)
-			size += q.cost
+			size += q.cost()
 		}
 		s.popFront()
 	}
 	if report := s.report; report != nil && len(s.queue) == 0 && len(batch) < batchCap {
-		s.encode(report)
 		if report.body == nil {
 			s.report = nil
-		} else if size+report.cost <= batchBytes {
+		} else if size+report.cost() <= batchBytes {
 			s.report = nil
 			batch = append(batch, report)
 		}
@@ -373,6 +378,7 @@ take:
 		slog.Warn("baton: an event is over the 1 MiB batch cap, which a collector refuses, so it has been dropped unsent",
 			"event_type", q.EventType, "bytes", len(q.body))
 	}
+	// Every event taken was unencodable or over the cap.
 	if batch == nil {
 		return s.nextBatch(force)
 	}
@@ -382,9 +388,6 @@ take:
 func (s *httpSink) encode(q *queued) {
 	if q.body == nil && q.encodeErr == nil {
 		q.body, q.encodeErr = encodeEvent(q.Event)
-		if q.body != nil {
-			q.cost = 1 + len(q.body)
-		}
 	}
 }
 
@@ -428,43 +431,59 @@ func (s *httpSink) deliver(batch []*queued) (kept []*queued, failed bool) {
 	return nil, false
 }
 
+// eventResult is one entry of a batch answer's results, read leniently
+// (SPEC §2.5): an unreadable error does not undo a "refused".
 type eventResult struct {
-	EventID string `json:"event_id"`
-	Status  string `json:"status"`
-	Error   struct {
-		Code string `json:"code"`
-	} `json:"error"`
+	EventID json.RawMessage `json:"event_id"`
+	Status  json.RawMessage `json:"status"`
+	Error   json.RawMessage `json:"error"`
+}
+
+// jsonString is raw as a string, or "" when it is not one.
+func jsonString(raw json.RawMessage) string {
+	var s string
+	_ = json.Unmarshal(raw, &s)
+	return s
 }
 
 // settle reads a 2xx answer's results by event_id. An event with no readable
 // result counts as delivered (SPEC §2.5).
 func (s *httpSink) settle(batch []*queued, answer []byte) {
-	results := map[string]eventResult{}
+	statuses, codes := map[string]string{}, map[string]string{}
 	var parsed struct{ Results []json.RawMessage }
 	if !s.single && json.Unmarshal(answer, &parsed) == nil {
 		for _, raw := range parsed.Results {
 			var r eventResult
-			if json.Unmarshal(raw, &r) == nil && r.EventID != "" {
-				results[r.EventID] = r
+			id := ""
+			if json.Unmarshal(raw, &r) == nil {
+				id = jsonString(r.EventID)
+			}
+			if id == "" {
+				continue
+			}
+			statuses[id] = jsonString(r.Status)
+			var e struct{ Code json.RawMessage }
+			if json.Unmarshal(r.Error, &e) == nil {
+				codes[id] = jsonString(e.Code)
 			}
 		}
 	}
 	var delivered *queued
 	refused, code := 0, ""
 	for _, q := range batch {
-		r := results[q.EventID]
+		status := statuses[q.EventID]
 		switch {
 		case q.isReport:
 			s.mu.Lock()
-			if r.Status == "refused" {
+			if status == "refused" {
 				s.reportsRefused = true
 			} else {
 				s.reportedSum = max(s.reportedSum, q.reportSum)
 			}
 			s.mu.Unlock()
-		case r.Status == "refused":
+		case status == "refused":
 			refused++
-			code = cmp.Or(code, r.Error.Code)
+			code = cmp.Or(code, codes[q.EventID])
 		case delivered == nil:
 			delivered = q
 		}
@@ -568,7 +587,7 @@ func (s *httpSink) post(batch []*queued) (status int, answer []byte, ok bool) {
 		url = s.origin + "/v0/events/batch"
 		size := batchFrame - 1
 		for _, q := range batch {
-			size += q.cost
+			size += q.cost()
 		}
 		var b bytes.Buffer
 		b.Grow(size)
@@ -638,15 +657,14 @@ func (s *httpSink) do(ctx context.Context, url string, body []byte) (int, []byte
 // clamped to SPEC §2.5's range, or 0 for any other value, which makes the
 // 429 a 5xx.
 func retryAfter(header string) time.Duration {
-	header = strings.TrimSpace(header)
-	if header == "" || strings.Trim(header, "0123456789") != "" {
+	secs, err := strconv.ParseUint(strings.TrimSpace(header), 10, 64)
+	if errors.Is(err, strconv.ErrRange) {
+		return retryAfterMax
+	}
+	if err != nil {
 		return 0
 	}
-	secs, err := strconv.ParseUint(header, 10, 64)
-	if err != nil || secs > uint64(retryAfterMax/time.Second) {
-		return retryAfterMax // only digits, so err is an overflow
-	}
-	return max(time.Duration(secs)*time.Second, retryAfterMin)
+	return max(time.Duration(min(secs, uint64(retryAfterMax/time.Second)))*time.Second, retryAfterMin)
 }
 
 // flush sends what is queued at once, and returns when that is done, at ctx's
