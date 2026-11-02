@@ -431,14 +431,6 @@ func (s *httpSink) deliver(batch []*queued) (kept []*queued, failed bool) {
 	return nil, false
 }
 
-// eventResult is one entry of a batch answer's results, read leniently
-// (SPEC §2.5): an unreadable error does not undo a "refused".
-type eventResult struct {
-	EventID json.RawMessage `json:"event_id"`
-	Status  json.RawMessage `json:"status"`
-	Error   json.RawMessage `json:"error"`
-}
-
 // jsonString is raw as a string, or "" when it is not one.
 func jsonString(raw json.RawMessage) string {
 	var s string
@@ -446,44 +438,54 @@ func jsonString(raw json.RawMessage) string {
 	return s
 }
 
+// jsonObject reads raw as an object. Unlike decoding into a struct, its keys
+// match only in their exact case, as json.loads and JSON.parse match them.
+func jsonObject(raw []byte) map[string]json.RawMessage {
+	var o map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &o)
+	return o
+}
+
+// refusals reads a batch answer's results (SPEC §2.5): the error code of each
+// event_id with a "refused" result, which wins over any other result for it.
+func refusals(answer []byte) map[string]string {
+	codes := map[string]string{}
+	var results []json.RawMessage
+	_ = json.Unmarshal(jsonObject(bytes.TrimPrefix(answer, []byte("\xEF\xBB\xBF")))["results"], &results)
+	for _, raw := range results {
+		r := jsonObject(raw)
+		id := jsonString(r["event_id"])
+		if id == "" || jsonString(r["status"]) != "refused" {
+			continue
+		}
+		codes[id] = cmp.Or(codes[id], jsonString(jsonObject(r["error"])["code"]))
+	}
+	return codes
+}
+
 // settle reads a 2xx answer's results by event_id. An event with no readable
 // result counts as delivered (SPEC §2.5).
 func (s *httpSink) settle(batch []*queued, answer []byte) {
-	statuses, codes := map[string]string{}, map[string]string{}
-	var parsed struct{ Results []json.RawMessage }
-	if !s.single && json.Unmarshal(answer, &parsed) == nil {
-		for _, raw := range parsed.Results {
-			var r eventResult
-			id := ""
-			if json.Unmarshal(raw, &r) == nil {
-				id = jsonString(r.EventID)
-			}
-			if id == "" {
-				continue
-			}
-			statuses[id] = jsonString(r.Status)
-			var e struct{ Code json.RawMessage }
-			if json.Unmarshal(r.Error, &e) == nil {
-				codes[id] = jsonString(e.Code)
-			}
-		}
+	var codes map[string]string
+	if !s.single {
+		codes = refusals(answer)
 	}
 	var delivered *queued
 	refused, code := 0, ""
 	for _, q := range batch {
-		status := statuses[q.EventID]
+		refusedCode, isRefused := codes[q.EventID]
 		switch {
 		case q.isReport:
 			s.mu.Lock()
-			if status == "refused" {
+			if isRefused {
 				s.reportsRefused = true
 			} else {
 				s.reportedSum = max(s.reportedSum, q.reportSum)
 			}
 			s.mu.Unlock()
-		case status == "refused":
+		case isRefused:
 			refused++
-			code = cmp.Or(code, codes[q.EventID])
+			code = cmp.Or(code, refusedCode)
 		case delivered == nil:
 			delivered = q
 		}

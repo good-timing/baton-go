@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
@@ -1163,6 +1164,35 @@ func TestARefusedResultWithAnUnreadableErrorIsStillRefused(t *testing.T) {
 	s.close(context.Background())
 	if got := processDrops.totals(); !maps.Equal(got, map[dropReason]int{dropRefused: 1}) {
 		t.Errorf("counts %v, want refused 1", got)
+	}
+}
+
+// The Python and TypeScript SDKs read a batch answer with json.loads and
+// JSON.parse; these bodies pin where Go must read it the same way.
+func TestABatchAnswerIsReadAsTheOtherSDKsReadIt(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body    string
+		refused int
+	}{
+		"a refused entry wins over a later one":    {`{"results":[{"event_id":"%[1]s","status":"refused"},{"event_id":"%[1]s","status":"accepted"}]}`, 1},
+		"a refused entry wins over an earlier one": {`{"results":[{"event_id":"%[1]s","status":"accepted"},{"event_id":"%[1]s","status":"refused"}]}`, 1},
+		"a later entry with no string status":      {`{"results":[{"event_id":"%[1]s","status":"refused"},{"event_id":"%[1]s","status":7}]}`, 1},
+		"keys match only in their exact case":      {`{"Results":[{"EVENT_ID":"%[1]s","Status":"refused"}],"results":[{"event_id":"%[1]s","Status":"refused"}]}`, 0},
+		"a leading byte order mark":                {"\xEF\xBB\xBF" + `{"results":[{"event_id":"%[1]s","status":"refused"}]}`, 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			captureLogs(t)
+			url, _ := answering(t, func(_ int, events []map[string]any, w http.ResponseWriter) {
+				_, _ = fmt.Fprintf(w, tc.body, events[0]["event_id"])
+			})
+			s := stopsWithTheTest(t, newHTTPSink(url, testKey))
+			s.flushEvery = time.Hour
+			s.write(testEvent(0))
+			s.close(context.Background())
+			if got := processDrops.totals()[dropRefused]; got != tc.refused {
+				t.Errorf("%d refused, want %d", got, tc.refused)
+			}
+		})
 	}
 }
 
