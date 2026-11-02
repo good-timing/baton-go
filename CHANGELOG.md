@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.3
 
 - **`tool_call_end.result` is the whole tool result,** as in `baton-ts`: its
   `content`, and its `structuredContent` when the tool has one. A typed tool
