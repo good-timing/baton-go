@@ -63,7 +63,7 @@ func installEcho(t *testing.T, server *mcp.Server, url string, set func(*httpSin
 	mcp.AddTool(server, &mcp.Tool{Name: "echo"}, echo)
 	var sent *httpSink
 	handle := installAs(t, server, Config{}, "acme", func() sink {
-		sent = newHTTPSink(url, testKey)
+		sent = stopsWithTheTest(t, newHTTPSink(url, testKey))
 		if set != nil {
 			set(sent)
 		}

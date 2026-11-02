@@ -109,7 +109,7 @@ func TestTheSinkKeepsItsPromisesAgainstABrokenCollector(t *testing.T) {
 		t.Run(sc.Name, func(t *testing.T) {
 			logs := captureLogs(t)
 			url := startCollector(t, sc)
-			s := newHTTPSink(url, testKey)
+			s := stopsWithTheTest(t, newHTTPSink(url, testKey))
 			spec.Settings.apply(s)
 
 			for n := 1; n <= sc.Events; n++ {

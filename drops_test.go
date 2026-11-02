@@ -37,12 +37,12 @@ func TestADroppedEventIsCountedOnceUnderItsReason(t *testing.T) {
 			s.putBack([]*queued{{Event: testEvent(0)}})
 		}},
 		"refused": {dropRefused, func(t *testing.T) {
-			s := fastSink(newFakeConsole(t, func(int) int { return http.StatusBadRequest }))
+			s := fastSink(t, newFakeConsole(t, func(int) int { return http.StatusBadRequest }))
 			s.write(testEvent(1))
 			s.close(context.Background())
 		}},
 		"encode_failed": {dropEncodeFailed, func(t *testing.T) {
-			s := fastSink(newFakeConsole(t, nil))
+			s := fastSink(t, newFakeConsole(t, nil))
 			s.write(Event{EventType: "tool_call_start", Payload: map[string]any{"bad": func() {}}})
 			s.close(context.Background())
 		}},
@@ -50,12 +50,12 @@ func TestADroppedEventIsCountedOnceUnderItsReason(t *testing.T) {
 			guard("tool_call_start", func() { panic("scrubber") })
 		}},
 		"after_close": {dropAfterClose, func(t *testing.T) {
-			s := fastSink(newFakeConsole(t, nil))
+			s := fastSink(t, newFakeConsole(t, nil))
 			s.close(context.Background())
 			s.write(testEvent(1))
 		}},
 		"unsent_at_close": {dropUnsentAtClose, func(t *testing.T) {
-			s := fastSink(newFakeConsole(t, func(int) int { return http.StatusServiceUnavailable }))
+			s := fastSink(t, newFakeConsole(t, func(int) int { return http.StatusServiceUnavailable }))
 			s.budget = 20 * time.Millisecond
 			s.write(testEvent(1))
 			s.close(context.Background())
@@ -76,7 +76,7 @@ func TestADroppedEventIsCountedOnceUnderItsReason(t *testing.T) {
 
 func TestTheFirstDeliveryAfterALossSaysWhatWasLost(t *testing.T) {
 	logs := captureLogs(t)
-	s := fastSink(newFakeConsole(t, func(n int) int { return []int{400, 202, 400, 202}[min(n, 3)] }))
+	s := fastSink(t, newFakeConsole(t, func(n int) int { return []int{400, 202, 400, 202}[min(n, 3)] }))
 	for n := range 4 {
 		s.write(testEvent(n))
 		waitFor(t, "a send", func() bool { return idle(s) })
@@ -99,7 +99,7 @@ func TestTheFirstDeliveryAfterALossSaysWhatWasLost(t *testing.T) {
 func TestAnEventInFlightWhenCloseGivesUpIsCountedOnce(t *testing.T) {
 	logs := captureLogs(t)
 	release := make(chan struct{})
-	s := fastSink(newFakeConsole(t, func(int) int { <-release; return http.StatusAccepted }))
+	s := fastSink(t, newFakeConsole(t, func(int) int { <-release; return http.StatusAccepted }))
 	s.write(testEvent(0))
 	waitFor(t, "the send to start", func() bool { s.mu.Lock(); defer s.mu.Unlock(); return len(s.inFlight) > 0 })
 	for n := range bufferCap {
@@ -116,7 +116,7 @@ func TestAnEventInFlightWhenCloseGivesUpIsCountedOnce(t *testing.T) {
 
 func TestAHealthyRunCountsAndLogsNothing(t *testing.T) {
 	logs := captureLogs(t)
-	s := fastSink(newFakeConsole(t, nil))
+	s := fastSink(t, newFakeConsole(t, nil))
 	for n := range 3 {
 		s.write(testEvent(n))
 	}

@@ -16,7 +16,7 @@ func reportSink(t *testing.T, statuses []int, reportStatus int) (*httpSink, *fak
 	freshDrops(t)
 	console := newFakeConsole(t, func(n int) int { return statuses[n] })
 	console.reportStatus = reportStatus
-	s := fastSink(console)
+	s := fastSink(t, console)
 	t.Cleanup(func() { s.close(context.Background()) })
 	return s, console
 }

@@ -393,6 +393,7 @@ func TestTheOffSwitchInstallsNothingAndChecksNothing(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		stopsWithTheHandle(t, handle)
 		handle.Close(context.Background())
 		cs := connect(t, server)
 		if got := cs.InitializeResult().Instructions; got != "" {
