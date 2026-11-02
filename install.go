@@ -190,6 +190,11 @@ func configure(cfg Config) (*installed, error) {
 	if cfg.IntentParam == "required" {
 		b.requiredNames = []string{userGoalParam}
 	}
+	if cfg.ResultCapture == "off" {
+		slog.Warn(`baton: ResultCapture "off" does not withhold the message of a failed listing, prompt or resource request. ` +
+			"tool_list_error, prompt_list_error, prompt_get_error, resource_list_error and resource_read_error carry that message, " +
+			"which can include text your handler returned. Return a message that names the resource, not its contents.")
+	}
 	return b, nil
 }
 

@@ -33,20 +33,17 @@ func (b *installed) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 				})
 			}
 			return res, err
-		case "tools/list":
-			res, err := next(ctx, method, req)
-			if r, ok := res.(*mcp.ListToolsResult); ok && err == nil {
-				var listed *mcp.ListToolsResult
-				guard("tools/list", func() { listed = b.augmentToolList(ctx, next, req, r) })
-				if listed != nil {
-					return listed, nil
-				}
-			}
-			return res, err
 		case "tools/call":
 			if r, ok := req.(*mcp.CallToolRequest); ok && r.Params != nil {
 				return b.toolCall(ctx, next, method, r)
 			}
+		}
+		if kind, ok := lifecycleKinds[method]; ok {
+			serve := func() (mcp.Result, error) { return next(ctx, method, req) }
+			if method == "tools/list" {
+				serve = func() (mcp.Result, error) { return b.listTools(ctx, next, req) }
+			}
+			return b.lifecycle(ctx, req, kind, serve)
 		}
 		return next(ctx, method, req)
 	}
@@ -163,6 +160,18 @@ func (b *installed) servesAnnotate(l listing) bool {
 	return true
 }
 
+func (b *installed) listTools(ctx context.Context, next mcp.MethodHandler, req mcp.Request) (mcp.Result, error) {
+	res, err := next(ctx, "tools/list", req)
+	if r, ok := res.(*mcp.ListToolsResult); ok && err == nil {
+		var listed *mcp.ListToolsResult
+		guard("tools/list", func() { listed = b.augmentToolList(ctx, next, req, r) })
+		if listed != nil {
+			return listed, nil
+		}
+	}
+	return res, err
+}
+
 // augmentToolList returns a copy of the page with user_goal in each schema,
 // and the annotate tool on the last page.
 func (b *installed) augmentToolList(ctx context.Context, next mcp.MethodHandler, req mcp.Request, r *mcp.ListToolsResult) *mcp.ListToolsResult {
@@ -225,19 +234,24 @@ type callContext struct {
 	client      *clientObserved
 }
 
-func (b *installed) newCallContext(ctx context.Context, r *mcp.CallToolRequest) callContext {
+func (b *installed) newCallContext(ctx context.Context, r mcp.Request) callContext {
 	var header http.Header
 	var token *auth.TokenInfo
-	if r.Extra != nil {
-		header, token = r.Extra.Header, r.Extra.TokenInfo
+	if extra := r.GetExtra(); extra != nil {
+		header, token = extra.Header, extra.TokenInfo
+	}
+	session, _ := r.GetSession().(*mcp.ServerSession)
+	var meta mcp.Meta
+	if params := r.GetParams(); params != nil && !reflect.ValueOf(params).IsNil() {
+		meta = params.GetMeta()
 	}
 	cc := callContext{
-		session: b.sessions.resolve(r.Session, header),
+		session: b.sessions.resolve(session, header),
 	}
 	cc.principal, cc.org = resolveCaller(ctx, b.cfg.ResolvePrincipal, token)
-	cc.client = b.observeClient(r.Params.Meta, r.Session, header)
-	if len(r.Params.Meta) > 0 {
-		meta, _ := jsonValue(map[string]any(r.Params.Meta)).(map[string]any)
+	cc.client = b.observeClient(meta, session, header)
+	if len(meta) > 0 {
+		meta, _ := jsonValue(map[string]any(meta)).(map[string]any)
 		// Rounded before the vendor's scrubber, so NoScrub keeps the rounding.
 		cc.runtimeMeta, _ = b.scrubOrNil(roundMetaCoordinates(meta), "runtime_meta").(map[string]any)
 	}
@@ -259,21 +273,21 @@ func (b *installed) toolCall(ctx context.Context, next mcp.MethodHandler, method
 		}
 	}
 
-	var (
-		cc    callContext
-		ready bool
-	)
 	tool := l.find(r.Params.Name)
 	// With no listing, a tool is not assumed missing.
 	known := tool != nil || !listed
-	// As in baton-sdk, a round that resumes a paused call is not a new start,
-	// and a paused round is not an end.
-	resuming := resumesAPause(r.Params)
-	guard("tool_call_start", func() {
-		params, goals := b.stripGoalParams(r, tool)
-		cc = b.newCallContext(ctx, r)
-		cc.callID = uuid7()
-		if !resuming {
+	var (
+		params any
+		goals  map[string]string
+	)
+	guard("user_goal", func() { params, goals = b.stripGoalParams(r, tool) })
+
+	res, err := b.around(ctx, r, "tool_call",
+		func(cc *callContext, resuming bool) {
+			cc.callID = uuid7()
+			if resuming {
+				return
+			}
 			if listed {
 				b.maybeSnapshot(l)
 			}
@@ -287,20 +301,12 @@ func (b *installed) toolCall(ctx context.Context, next mcp.MethodHandler, method
 			if start.CallIntent != nil || start.CallExpected != nil || start.CallWorkflow != nil {
 				start.IntentSource = ptr(intentSourceParam)
 			}
-			b.emit(cc, "tool_call_start", start)
-		}
-		ready = true
-	})
-
-	began := time.Now()
-	res, err := next(ctx, method, r)
-	elapsed := time.Since(began).Milliseconds()
-
-	if ready && !paused(res) {
-		guard("tool_call_end", func() {
+			b.emit(*cc, "tool_call_start", start)
+		},
+		func() (mcp.Result, error) { return next(ctx, method, r) },
+		func(cc callContext, res mcp.Result, err error, elapsed int64) {
 			b.emitOutcome(cc, r.Params.Name, known, tool != nil && tool.OutputSchema != nil, res, err, elapsed)
 		})
-	}
 	// go-sdk v1.7+ panics on a nil result under MCP 2026-07-28; its typed
 	// AddTool sends an empty one (TestAHandlerReturningNothingStillEnds).
 	if result, ok := res.(*mcp.CallToolResult); err == nil && (res == nil || ok && result == nil) {

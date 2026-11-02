@@ -246,7 +246,7 @@ func TestStatelessHTTP(t *testing.T) {
 		sessions     int
 		origin       string
 	}{
-		"no session id":     {func() string { return "" }, 3, "minted"},
+		"no session id":     {func() string { return "" }, 4, "minted"},
 		"server issues one": {nil, 1, "observed"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -255,7 +255,7 @@ func TestStatelessHTTP(t *testing.T) {
 			sink := installOn(t, server, Config{ReportMode: "on"})
 			cs := connectOver(t, &mcp.StreamableClientTransport{Endpoint: serveHTTP(t, server, false, &mcp.StreamableHTTPOptions{Stateless: true})})
 			if c.getSessionID == nil && goSDKv17() {
-				c.sessions, c.origin = 3, "minted"
+				c.sessions, c.origin = 4, "minted"
 			}
 
 			tools, err := cs.ListTools(context.Background(), nil)
@@ -282,7 +282,8 @@ func TestStatelessHTTP(t *testing.T) {
 				sessions[e.SessionID] = append(sessions[e.SessionID], e.EventType)
 			}
 			// SPEC §3.4: rung 4 when the header is there, else rung 5, one
-			// session per request, with each call's start and end together.
+			// session per request (the listing, two calls, the annotation),
+			// with each request's start and end together.
 			if len(sessions) != c.sessions {
 				t.Fatalf("want %d sessions, got %v", c.sessions, sessions)
 			}

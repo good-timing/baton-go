@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- **Prompt, resource and tool-list requests are recorded** (SPEC §11.4.4,
+  §11.4.5), as in `baton-sdk` and `baton-ts`: `prompt_list`, `prompt_get`,
+  `resource_list`, `resource_read` and `tool_list`, each a start and an end
+  or error. A prompt's arguments and a read's params are scrubbed. A
+  listing's end carries how many items it returned. No event carries a
+  prompt's messages or a resource's contents. A listing Baton runs for
+  itself sends none.
+  - A prompt or read that pauses for the client's input (go-sdk v1.7+) is one
+    request, as a tool call is. go-sdk cannot complete a paused read for a
+    client of the older protocol and answers it with an error, which is the
+    read's `resource_read_error`.
+  - On stateless HTTP, each listing is its own session, as each call is.
+  - **Under `ResultCapture: "off"` the message of a failed listing, prompt or
+    resource request is still sent** (SPEC §11.4.4), and `Install` logs a
+    warning about it once.
+
 ## 0.1.3
 
 - **`tool_call_end.result` is the whole tool result,** as in `baton-ts`: its

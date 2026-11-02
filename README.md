@@ -82,7 +82,7 @@ Only what crosses the MCP call. The SDK never reads your logs, your database or 
 
 | Sent | What |
 |---|---|
-| Always | The tool's name, its arguments (`params`, scrubbed), `user_goal`, how long the call took, and on failure the `error_type`. The request's `_meta`, as `runtime_meta` (scrubbed, with any latitude and longitude rounded). What the client declares about itself, such as its name and version, and on HTTP its `User-Agent` and `X-Anthropic-Client` headers. Once per change: your server's name, version, capabilities and instructions, and each tool's name, description and schemas. Who the caller is and their company, only if you set `ResolvePrincipal`. |
+| Always | The tool's name, its arguments (`params`, scrubbed), `user_goal`, how long the call took, and on failure the `error_type`. The request's `_meta`, as `runtime_meta` (scrubbed, with any latitude and longitude rounded). What the client declares about itself, such as its name and version, and on HTTP its `User-Agent` and `X-Anthropic-Client` headers. Once per change: your server's name, version, capabilities and instructions, and each tool's name, description and schemas. Who the caller is and their company, only if you set `ResolvePrincipal`. For a prompt or a resource: its name and arguments (scrubbed), or its URI, how long the request took, and on failure the error's type and message. How many tools, prompts or resources a listing returned. Never a prompt's messages or a resource's contents. |
 | Only with `ResultCapture: "full"` (the default) | What the tool returned (`result`), including any error text in it, and the message of an `error` your handler returned. |
 | With `ReportMode: "on"` | The reports the agent files, in its own words. |
 | Never | Anything that did not cross the MCP call. |
@@ -123,7 +123,7 @@ If your users belong to your customers' companies, return the company too, so yo
 
 `ResultCapture: "off"` and nothing **derived from what your tool returns** leaves your process: not the result, and not the error text, whether your handler returns it in the result or returns it as an `error`. Requests are unaffected: `params` are captured either way. Each affected event says so in its own field (`result_capture: "off"`).
 
-**What is still sent:** the tool name, the duration, whether the call failed, and the `error_type`, which for a returned `error` is its Go type name, such as `*acme.NotFoundError`. So failure detection and timing keep working. Two messages are kept too: the message of a call to a tool that does not exist (when it is tagged `unknown_tool`, below), and a message you return as a `*baton.PublicError`, which marks it safe to send.
+**What is still sent:** the tool name, the duration, whether the call failed, and the `error_type`, which for a returned `error` is its Go type name, such as `*acme.NotFoundError`. So failure detection and timing keep working. Two messages are kept too: the message of a call to a tool that does not exist (when it is tagged `unknown_tool`, below), and a message you return as a `*baton.PublicError`, which marks it safe to send. The message of a failed listing, prompt or resource request is kept as well, and `Install` warns once about this when the mode is off. It can include text your handler returned, so return a message that names the resource, not its contents.
 
 ## Failures your handler never saw
 

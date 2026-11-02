@@ -19,10 +19,10 @@ func instructionsOf(res mcp.Result) *string {
 	return nil
 }
 
-// resumesAPause is a call that carries the client's answers to a paused round
-// (SEP-2322, v1.7+), and paused is a round that asks for them
-// (TestAPausedCallIsOneCall).
-func resumesAPause(p *mcp.CallToolParamsRaw) bool {
+// resumesAPause is a request that carries the client's answers to a paused
+// round (SEP-2322, v1.7+), and paused is a round that asks for them
+// (TestAPausedCallIsOneCall, TestAPausedRequestIsOne).
+func resumesAPause(p mcp.Params) bool {
 	return isSet(p, "InputResponses") || isSet(p, "RequestState")
 }
 
