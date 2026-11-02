@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.4
 
 - **Prompt, resource and tool-list requests are recorded** (SPEC §11.4.4,
   §11.4.5), as in `baton-sdk` and `baton-ts`: `prompt_list`, `prompt_get`,
