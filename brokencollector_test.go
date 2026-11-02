@@ -72,6 +72,9 @@ func startCollector(t *testing.T, sc collectorScenario) string {
 
 type received struct {
 	Accepted []int
+	Events   []struct {
+		EventType string `json:"event_type"`
+	}
 	Requests int
 	Reports  int
 }
