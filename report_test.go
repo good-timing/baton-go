@@ -2,6 +2,7 @@ package baton
 
 import (
 	"context"
+	"net/http"
 	"strconv"
 	"strings"
 	"testing"
@@ -221,6 +222,20 @@ func TestNoReportStartsOnceCloseBegan(t *testing.T) {
 	s.reportDue(testEvent(2))
 	if !reportIdle(s) || console.reportCount() != 0 {
 		t.Errorf("a report started after close")
+	}
+}
+
+func TestACollectorWithoutTheBatchEndpointCanStillRefuseReports(t *testing.T) {
+	logs := captureLogs(t)
+	s, console := reportSink(t, []int{400, 202, 400, 202}, 400)
+	console.noBatch = http.StatusNotFound
+	s.reportEvery = 0
+	sendAll(t, s, 4)
+	if console.reportCount() != 1 || processDrops.totals()[dropRefused] != 2 {
+		t.Errorf("%d reports, counts %v", console.reportCount(), processDrops.totals())
+	}
+	if n := strings.Count(logs.String(), "REFUSED"); n != 2 {
+		t.Errorf("%d refusals logged, want 2", n)
 	}
 }
 

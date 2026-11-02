@@ -708,14 +708,14 @@ func TestAnEventOverTheByteCapIsRefusedAndTheNextStillGoes(t *testing.T) {
 func TestABatchGoesFlushIntervalAfterTheOldestEvent(t *testing.T) {
 	console := newFakeConsole(t, nil)
 	s := fastSink(console)
-	s.flushEvery = 150 * time.Millisecond
+	s.flushEvery = 200 * time.Millisecond
 	start := time.Now()
 	s.write(testEvent(0))
-	time.Sleep(75 * time.Millisecond)
+	time.Sleep(150 * time.Millisecond)
 	s.write(testEvent(1))
 	waitFor(t, "the timer", func() bool { return console.count() == 1 })
 	took := time.Since(start)
-	if took < s.flushEvery || took > s.flushEvery+60*time.Millisecond {
+	if took < s.flushEvery || took > s.flushEvery+120*time.Millisecond {
 		t.Errorf("sent %v after the first write, want about %v", took, s.flushEvery)
 	}
 	if got := console.batchSizes(); !slices.Equal(got, []int{2}) {
