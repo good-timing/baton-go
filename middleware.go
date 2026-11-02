@@ -270,15 +270,21 @@ func (b *installed) toolCall(ctx context.Context, next mcp.MethodHandler, method
 	// and a paused round is not an end.
 	resuming := resumesAPause(r.Params)
 	guard("tool_call_start", func() {
-		params, goal := b.stripGoalParams(r, tool)
+		params, goals := b.stripGoalParams(r, tool)
 		cc = b.newCallContext(ctx, r)
 		cc.callID = uuid7()
 		if !resuming {
 			if listed {
 				b.maybeSnapshot(l)
 			}
-			start := toolCallStart{ToolName: r.Params.Name, Params: b.scrubParams(params), CallIntent: b.scrubOptionalOrNil(goal, userGoalParam)}
-			if start.CallIntent != nil {
+			start := toolCallStart{
+				ToolName:     r.Params.Name,
+				Params:       b.scrubParams(params),
+				CallIntent:   b.scrubOptionalOrNil(goals[userGoalParam], userGoalParam),
+				CallExpected: b.scrubOptionalOrNil(goals[expectedResultParam], expectedResultParam),
+				CallWorkflow: b.scrubOptionalOrNil(goals[overallTaskParam], overallTaskParam),
+			}
+			if start.CallIntent != nil || start.CallExpected != nil || start.CallWorkflow != nil {
 				start.IntentSource = ptr(intentSourceParam)
 			}
 			b.emit(cc, "tool_call_start", start)
@@ -310,18 +316,19 @@ var (
 // arguments before go-sdk checks them against the tool's schema (SPEC
 // §5.1.2), except a name the tool declares itself. Other values pass through
 // as the client wrote them, so a large integer is not rounded through a
-// float. It returns the arguments the vendor receives, and the goal.
-func (b *installed) stripGoalParams(r *mcp.CallToolRequest, tool *mcp.Tool) (any, string) {
+// float. It returns the arguments the vendor receives, and the non-blank
+// string value of each name it removed.
+func (b *installed) stripGoalParams(r *mcp.CallToolRequest, tool *mcp.Tool) (any, map[string]string) {
 	var args map[string]json.RawMessage
 	if len(r.Params.Arguments) == 0 || json.Unmarshal(r.Params.Arguments, &args) != nil || args == nil {
-		return jsonValue(r.Params.Arguments), ""
+		return jsonValue(r.Params.Arguments), nil
 	}
 	names := unknownToolGoalParams
 	if tool != nil {
 		names = knownToolGoalParams
 	}
 	before := len(args)
-	goal := ""
+	var goals map[string]string
 	for _, name := range names {
 		raw, present := args[name]
 		if !present || (tool != nil && b.declares(tool, name)) {
@@ -329,8 +336,11 @@ func (b *installed) stripGoalParams(r *mcp.CallToolRequest, tool *mcp.Tool) (any
 		}
 		delete(args, name)
 		var s string
-		if name == userGoalParam && json.Unmarshal(raw, &s) == nil && strings.TrimSpace(s) != "" {
-			goal = s
+		if json.Unmarshal(raw, &s) == nil && strings.TrimSpace(s) != "" {
+			if goals == nil {
+				goals = map[string]string{}
+			}
+			goals[name] = s
 		}
 	}
 	if len(args) != before {
@@ -338,7 +348,7 @@ func (b *installed) stripGoalParams(r *mcp.CallToolRequest, tool *mcp.Tool) (any
 			r.Params.Arguments = raw
 		}
 	}
-	return jsonValue(r.Params.Arguments), goal
+	return jsonValue(r.Params.Arguments), goals
 }
 
 // emitOutcome sends the call's end or error. A failure is classified first,

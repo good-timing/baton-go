@@ -133,6 +133,16 @@ func TestUserGoalNeverReachesTheVendor(t *testing.T) {
 	}
 }
 
+func TestRetiredNamesAreRecordedNotPassedOn(t *testing.T) {
+	server, sink := installWithSink(t, Config{}, addLookup)
+	call(t, connect(t, server), "lookup", map[string]any{"name": "a", "expected_result": "found", "overall_task": "2: find a"})
+	start := ofType(sink.all(), "tool_call_start")[0].Payload.(toolCallStart)
+	if !reflect.DeepEqual(start.Params, map[string]any{"name": "a"}) || start.CallIntent != nil ||
+		deref(start.CallExpected) != "found" || deref(start.CallWorkflow) != "2: find a" || deref(start.IntentSource) != intentSourceParam {
+		t.Errorf("start = %+v", start)
+	}
+}
+
 func TestInstructionsGoAfterTheVendors(t *testing.T) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "acme"}, &mcp.ServerOptions{Instructions: "Vendor text."})
 	addLookup(server)

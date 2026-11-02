@@ -10,15 +10,17 @@ import (
 // byte-identical to it: these strings were scored on live agents.
 
 const (
-	userGoalParam      = "user_goal"
-	intentSourceParam  = "injected_param"
-	annotateSuffix     = "_annotate"
-	instructionsCap    = 1500
-	claudeCodeTruncCap = 2087
+	userGoalParam       = "user_goal"
+	expectedResultParam = "expected_result"
+	overallTaskParam    = "overall_task"
+	intentSourceParam   = "injected_param"
+	annotateSuffix      = "_annotate"
+	instructionsCap     = 1500
+	claudeCodeTruncCap  = 2087
 )
 
 // A client holding an old tool list may still send these.
-var retiredParams = []string{"expected_result", "overall_task"}
+var retiredParams = []string{expectedResultParam, overallTaskParam}
 
 const userGoalFormat = "'<n>: <what this call is for>; success is <what its result should show>'"
 
