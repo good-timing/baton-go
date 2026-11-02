@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+- **`tool_call_end.result` is the whole tool result,** as in `baton-ts`: its
+  `content`, and its `structuredContent` when the tool has one. A typed tool
+  made with `mcp.AddTool` always has one. Before, only `content` was sent.
+  **If you pass your own `Scrubber`, check it:** the result now reaches it as
+  an object with a `content` list inside, not as the list itself.
+- **go-sdk's own checks of a typed tool are named** in `failure_kind`
+  (SPEC §11.4.3): `invalid_argument` when its schema check rejects the
+  arguments, and `output_schema_mismatch` when it rejects or cannot encode
+  the tool's output. They happen below Baton, so Baton reads go-sdk's fixed
+  messages; a test checks them on every go-sdk version CI runs. Under
+  `ResultCapture: "off"` both texts are withheld, because a tool can return
+  the same words. Not named: arguments that pass the schema but not the
+  conversion to your Go type (go-sdk gives that error no fixed message), and
+  `refused`, which Go cannot see.
+- **`error_body` is cut at 2,000 code points** after scrubbing, as in
+  `baton-sdk` and `baton-ts`.
+- **On SSE, a call's session is go-sdk's own `sessionid`** from the client's
+  endpoint URL, sent with `session_id_origin: "observed"` and
+  `transport_observed: "http"` (SPEC §3.4 rung 4b). Before, it was an id
+  Baton made per connection, `"minted"`, with no transport.
+
 ## 0.1.2
 
 - **Works on go-sdk v1.7 and v1.8, as well as v1.6.1.** go.mod still

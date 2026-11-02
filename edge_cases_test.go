@@ -49,6 +49,9 @@ func TestSSEClientsGetTheirOwnSessions(t *testing.T) {
 	sessions := map[string]bool{}
 	for _, e := range ofType(sink.all(), "tool_call_start") {
 		sessions[e.SessionID] = true
+		if deref(e.SessionIDOrigin) != "observed" || deref(e.TransportObserved) != "http" {
+			t.Errorf("origin %q, transport %q; want observed, http (SPEC §3.4 rung 4b)", deref(e.SessionIDOrigin), deref(e.TransportObserved))
+		}
 	}
 	if len(sessions) != 2 {
 		t.Fatalf("want one session per SSE client, got %v", sessions)
@@ -315,18 +318,18 @@ func TestTransportObserved(t *testing.T) {
 	}
 	for name, c := range map[string]struct {
 		connect func(*testing.T, *mcp.Server) *mcp.ClientSession
-		want    string // "" for null: go-sdk shows SSE no headers
+		want    string
 	}{
 		"in-memory": {inMemory, "no-http-request"},
-		"SSE":       {overSSE, ""},
+		"SSE":       {overSSE, "http"},
 		"HTTP":      {overHTTP, "http"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			server, sink := installWithSink(t, Config{}, addLookup)
 			call(t, c.connect(t, server), "lookup", map[string]any{"name": "a"})
 			got := ofType(sink.all(), "tool_call_start")[0].TransportObserved
-			if (got == nil) != (c.want == "") || (got != nil && *got != c.want) {
-				t.Errorf("transport_observed = %v, want %q", got, c.want)
+			if deref(got) != c.want {
+				t.Errorf("transport_observed = %q, want %q", deref(got), c.want)
 			}
 		})
 	}

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"net/url"
 	"reflect"
 	"strings"
 	"sync"
@@ -55,7 +56,9 @@ func mintSessionID() string { return "sdk-" + uuid7() }
 //   - else, under HTTP, a new id per request (rung 5);
 //   - else, with no HTTP request (stdio, in-memory), the process-wide id, which
 //     the surface_snapshot shares, as in baton-sdk;
-//   - else (SSE, which passes no headers) an id per go-sdk connection.
+//   - else, on SSE, which passes no headers, go-sdk's own sessionid from the
+//     client's endpoint URL (rung 4b);
+//   - else an id per go-sdk connection.
 //
 // The header is read directly because ServerSession.ID cannot tell an id the
 // client sent from one go-sdk made up. Weak keys let a closed connection be
@@ -87,7 +90,28 @@ func (s *sessions) resolve(conn *mcp.ServerSession, header http.Header) callSess
 	if s.ioConnType != nil && connType(conn) == s.ioConnType {
 		return callSession{id: s.fallback, origin: "minted", transport: &transportNoHTTP}
 	}
+	if id := sseSessionID(conn); id != "" {
+		return callSession{id: id, origin: "observed", transport: &transportHTTP}
+	}
 	return callSession{id: s.minted.getOrPut(weak.Make(conn), mintSessionID), origin: "minted"}
+}
+
+// sseSessionID is the sessionid go-sdk put in an SSE client's endpoint URL, or
+// "". go-sdk's SSE connection reports no SessionID, so it is read by reflection.
+func sseSessionID(conn *mcp.ServerSession) string {
+	c := mcpConn(conn)
+	if !c.IsValid() || c.Kind() != reflect.Pointer || c.Elem().Kind() != reflect.Struct {
+		return ""
+	}
+	t := c.Elem().FieldByName("t")
+	if !t.IsValid() || t.Type() != reflect.TypeFor[*mcp.SSEServerTransport]() || t.IsNil() {
+		return ""
+	}
+	endpoint, err := url.Parse(t.Elem().FieldByName("Endpoint").String())
+	if err != nil {
+		return ""
+	}
+	return endpoint.Query().Get("sessionid")
 }
 
 // process is the process-wide session, for events that belong to no caller.
@@ -95,15 +119,23 @@ func (s *sessions) process() callSession {
 	return callSession{id: s.fallback, origin: "minted"}
 }
 
-// connType is the dynamic type of the session's connection. go-sdk does not
-// export it, so it is read by reflection; a renamed field gives nil, and the
-// transport is then reported as unknown.
+// connType is the dynamic type of the session's connection; nil when it cannot
+// be read, and the transport is then reported as unknown.
 func connType(conn *mcp.ServerSession) reflect.Type {
+	if c := mcpConn(conn); c.IsValid() {
+		return c.Type()
+	}
+	return nil
+}
+
+// mcpConn is the session's connection, read by reflection as go-sdk does not
+// export it; invalid when the field is missing or nil.
+func mcpConn(conn *mcp.ServerSession) reflect.Value {
 	field := reflect.ValueOf(conn).Elem().FieldByName("mcpConn")
 	if !field.IsValid() || field.IsNil() {
-		return nil
+		return reflect.Value{}
 	}
-	return field.Elem().Type()
+	return field.Elem()
 }
 
 // sequencer numbers each session's events from 1 (SPEC §11.2 rule 3). An

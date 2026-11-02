@@ -297,7 +297,9 @@ func (b *installed) toolCall(ctx context.Context, next mcp.MethodHandler, method
 	elapsed := time.Since(began).Milliseconds()
 
 	if ready && !paused(res) {
-		guard("tool_call_end", func() { b.emitOutcome(cc, r.Params.Name, known, res, err, elapsed) })
+		guard("tool_call_end", func() {
+			b.emitOutcome(cc, r.Params.Name, known, tool != nil && tool.OutputSchema != nil, res, err, elapsed)
+		})
 	}
 	// go-sdk v1.7+ panics on a nil result under MCP 2026-07-28; its typed
 	// AddTool sends an empty one (TestAHandlerReturningNothingStillEnds).
@@ -353,7 +355,7 @@ func (b *installed) stripGoalParams(r *mcp.CallToolRequest, tool *mcp.Tool) (any
 
 // emitOutcome sends the call's end or error. A failure is classified first,
 // then withheld in one place under ResultCapture "off" (SPEC §11.4.3).
-func (b *installed) emitOutcome(cc callContext, toolName string, known bool, res mcp.Result, err error, elapsed int64) {
+func (b *installed) emitOutcome(cc callContext, toolName string, known, checksOutput bool, res mcp.Result, err error, elapsed int64) {
 	result, _ := res.(*mcp.CallToolResult)
 	failure := toolCallError{ToolName: toolName, DurationMS: elapsed}
 	var raised error
@@ -362,13 +364,15 @@ func (b *installed) emitOutcome(cc callContext, toolName string, known bool, res
 		raised = err
 		if !known {
 			failure.FailureKind = ptr("unknown_tool")
+		} else if checksOutput && goSDKRejectedOutput(err) {
+			failure.FailureKind = ptr("output_schema_mismatch")
 		}
 	case result == nil || !result.IsError:
 		end := toolCallEnd{ToolName: toolName, DurationMS: elapsed}
 		if b.withholding() {
 			end.ResultCapture = ptr("off")
 		} else if result != nil {
-			end.Result = b.scrubValue(jsonValue(result.Content))
+			end.Result = b.scrubValue(jsonValue(result))
 		}
 		b.emit(cc, "tool_call_end", end)
 		return
@@ -376,20 +380,24 @@ func (b *installed) emitOutcome(cc callContext, toolName string, known bool, res
 		// go-sdk turns the handler's returned error into this result and keeps
 		// the error: a raise, in SPEC §11.4.3's terms.
 		raised = result.GetError()
+		if goSDKRejectedArguments(raised) {
+			failure.FailureKind = ptr("invalid_argument")
+		}
 	default:
 		failure.ErrorType = "tool_error"
-		failure.ErrorBody = b.scrubText(contentText(result.Content))
+		failure.ErrorBody = b.errorBody(contentText(result.Content))
 		failure.Result = b.scrubValue(jsonValue(result))
 	}
 	if raised != nil {
 		failure.ErrorType = errorType(raised)
-		failure.ErrorBody = b.scrubText(raised.Error())
+		failure.ErrorBody = b.errorBody(raised.Error())
 	}
-	// unknown_tool's message stays: it describes the request, not a result.
-	if b.withholding() && failure.FailureKind == nil {
+	// unknown_tool's message describes the request. go-sdk's argument message
+	// does too, but a tool can return the same words, so it is withheld.
+	if b.withholding() && (failure.FailureKind == nil || *failure.FailureKind != "unknown_tool") {
 		var public *PublicError
 		if errors.As(raised, &public) {
-			failure.ErrorBody = b.scrubText(public.Message)
+			failure.ErrorBody = b.errorBody(public.Message)
 		} else {
 			failure.ErrorBody, failure.Result, failure.ResultCapture = ptr(""), nil, ptr("off")
 		}
@@ -490,6 +498,16 @@ func (b *installed) scrubValue(v any) any {
 func (b *installed) scrubText(s string) *string {
 	if out, ok := b.cfg.Scrubber(s).(string); ok {
 		return &out
+	}
+	return nil
+}
+
+const errorBodyCap = 2000
+
+// errorBody is s scrubbed, then cut to errorBodyCap code points, as baton-sdk does.
+func (b *installed) errorBody(s string) *string {
+	if out := b.scrubText(s); out != nil {
+		return ptr(cutRunes(*out, errorBodyCap))
 	}
 	return nil
 }

@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -130,6 +131,71 @@ func TestUserGoalNeverReachesTheVendor(t *testing.T) {
 	start := ofType(sink.all(), "tool_call_start")[0].Payload.(toolCallStart)
 	if !reflect.DeepEqual(start.Params, map[string]any{"name": "a"}) {
 		t.Errorf("params = %v", start.Params)
+	}
+}
+
+func TestATypedToolsStructuredOutputIsCaptured(t *testing.T) {
+	server, sink := installWithSink(t, Config{}, addLookup)
+	call(t, connect(t, server), "lookup", map[string]any{"name": "a"})
+	result, _ := ofType(sink.all(), "tool_call_end")[0].Payload.(toolCallEnd).Result.(map[string]any)
+	if !reflect.DeepEqual(result["structuredContent"], map[string]any{"found": true, "name": "a"}) || result["content"] == nil {
+		t.Errorf("result = %v; want the whole result, structuredContent included", result)
+	}
+}
+
+func TestAnErrorBodyIsCutAt2000CodePoints(t *testing.T) {
+	long := strings.Repeat("a", 1999) + "é" + strings.Repeat("b", 10)
+	server, sink := installWithSink(t, Config{}, func(s *mcp.Server) {
+		mcp.AddTool(s, &mcp.Tool{Name: "fail"}, func(context.Context, *mcp.CallToolRequest, map[string]any) (*mcp.CallToolResult, any, error) {
+			return nil, nil, errors.New(long)
+		})
+	})
+	call(t, connect(t, server), "fail", map[string]any{})
+	if body := deref(ofType(sink.all(), "tool_call_error")[0].Payload.(toolCallError).ErrorBody); body != long[:2001] {
+		t.Errorf("error_body has %d code points, ends %q; want 2000, ending é", utf8.RuneCountInString(body), body[max(0, len(body)-3):])
+	}
+}
+
+func TestGoSDKsOwnChecksAreNamed(t *testing.T) {
+	register := func(s *mcp.Server) {
+		addLookup(s)
+		out := &mcp.Tool{Name: "badOutput", OutputSchema: json.RawMessage(`{"type":"object","required":["id"]}`)}
+		mcp.AddTool(s, out, func(context.Context, *mcp.CallToolRequest, map[string]any) (*mcp.CallToolResult, map[string]any, error) {
+			return nil, map[string]any{}, nil
+		})
+		mcp.AddTool(s, &mcp.Tool{Name: "unencodable"}, func(context.Context, *mcp.CallToolRequest, map[string]any) (*mcp.CallToolResult, map[string]any, error) {
+			return nil, map[string]any{"f": func() {}}, nil
+		})
+		// go-sdk checks nothing of a raw tool, so its own words are its own error.
+		s.AddTool(&mcp.Tool{Name: "raw", InputSchema: json.RawMessage(`{"type":"object"}`)}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return nil, errors.New("marshaling output: not go-sdk")
+		})
+	}
+	cases := []struct{ tool, kind, body string }{
+		{"lookup", "invalid_argument", `validating "arguments"`},
+		{"badOutput", "output_schema_mismatch", "validating tool output"},
+		{"unencodable", "output_schema_mismatch", "marshaling output"},
+		{"raw", "<absent>", "marshaling output"},
+	}
+	for _, capture := range []string{"full", "off"} {
+		server, sink := installWithSink(t, Config{ResultCapture: capture}, register)
+		cs := connect(t, server)
+		for _, c := range cases {
+			_, _ = cs.CallTool(context.Background(), &mcp.CallToolParams{Name: c.tool, Arguments: map[string]any{"name": 5}})
+		}
+		failures := ofType(sink.all(), "tool_call_error")
+		if len(failures) != len(cases) {
+			t.Fatalf("%s: %d errors, want %d", capture, len(failures), len(cases))
+		}
+		for i, c := range cases {
+			p := failures[i].Payload.(toolCallError)
+			if deref(p.FailureKind) != c.kind {
+				t.Errorf("%s %s: failure_kind %q, want %q", capture, c.tool, deref(p.FailureKind), c.kind)
+			}
+			if kept, wantKept := strings.HasPrefix(deref(p.ErrorBody), c.body), capture == "full"; kept != wantKept {
+				t.Errorf("%s %s: error_body %q; kept should be %v", capture, c.tool, deref(p.ErrorBody), wantKept)
+			}
+		}
 	}
 }
 

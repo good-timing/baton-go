@@ -199,8 +199,9 @@ func TestAScrubbedValueThatCannotBeEncodedCostsWhatAScrubberPanicCosts(t *testin
 			if v["trace"] != nil || v["name"] == "alice" || v["ticket"] != nil {
 				return bad
 			}
-		case []any:
-			return []any{map[string]any{"bad": leakyValue{}}}
+			if v["content"] != nil {
+				return map[string]any{"bad": leakyValue{}}
+			}
 		}
 		return v
 	}
@@ -435,7 +436,7 @@ func TestParamsIsAlwaysAnObject(t *testing.T) {
 
 func TestAScrubberThatPanicsOnAResultDropsOnlyTheEndAndCountsIt(t *testing.T) {
 	captureLogs(t)
-	scrub := panicsOn(func(v any) bool { _, ok := v.([]any); return ok })
+	scrub := panicsOn(func(v any) bool { m, ok := v.(map[string]any); return ok && m["content"] != nil })
 	server, sink := installWithSink(t, Config{Scrubber: scrub}, addLookup)
 	call(t, connect(t, server), "lookup", map[string]any{"name": "alice"})
 	if starts, ends := ofType(sink.all(), "tool_call_start"), ofType(sink.all(), "tool_call_end"); len(starts) != 1 || len(ends) != 0 {

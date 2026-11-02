@@ -2,6 +2,7 @@ package baton
 
 import (
 	"reflect"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -43,4 +44,16 @@ func structField(v any, name string) reflect.Value {
 		return reflect.Value{}
 	}
 	return p.Elem().FieldByName(name)
+}
+
+// go-sdk checks a typed tool's arguments and output inside the tool's handler,
+// below this middleware, so its fixed messages are the only sign
+// (TestGoSDKsOwnChecksAreNamed, run on every CI leg).
+func goSDKRejectedArguments(err error) bool {
+	return strings.HasPrefix(err.Error(), `validating "arguments": `)
+}
+
+func goSDKRejectedOutput(err error) bool {
+	msg := err.Error()
+	return strings.HasPrefix(msg, "validating tool output: ") || strings.HasPrefix(msg, "marshaling output: ")
 }

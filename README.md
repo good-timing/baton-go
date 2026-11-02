@@ -129,6 +129,8 @@ If your users belong to your customers' companies, return the company too, so yo
 
 A call to a tool that does not exist never reaches a handler. Baton still records it, as `tool_call_error` with `failure_kind: "unknown_tool"`. To know a tool is missing, Baton lists your tools on each call; if that listing fails, the event has no `failure_kind`.
 
+For a tool made with `mcp.AddTool`, go-sdk checks the arguments against the input schema before your handler runs, and the output against the output schema after. Baton names those failures `invalid_argument` and `output_schema_mismatch`, read from go-sdk's own messages. Two failures are not named: arguments that pass the schema but not the conversion to your Go type, and a call your own middleware turns away before the tool runs (`refused` in the other SDKs), which Baton cannot see.
+
 ## Turning capture off entirely
 
 `BATON_DISABLED=1` in the environment of the process running the server, and `Install` adds nothing at all: no changed tools, no annotation tool, no added instructions, no collector connection. Nothing in the config is checked either, so the switch cannot stop your server.
@@ -142,7 +144,6 @@ None of it blocks the quickstart above.
 - No library API: only a go-sdk `*mcp.Server` is wrapped.
 - Only tools. Resources, prompts and `tools/list` requests emit no events.
 - No local mode, and no file or stderr output: events go to the collector the DSN names.
-- Arguments that fail go-sdk's input schema, and results that fail its output schema, are recorded as `tool_call_error` with no `failure_kind`.
 
 ## Wire compatibility
 
