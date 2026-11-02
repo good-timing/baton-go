@@ -112,8 +112,8 @@ func TestANewLossIsReportedOnceTheIntervalPassed(t *testing.T) {
 	}
 }
 
-// reportIDs is how many different reports arrived: a failed one is retried
-// under its own event_id.
+// reportIDs is how many different reports arrived: a report kept with its
+// batch is retried under its own event_id.
 func (c *fakeConsole) reportIDs() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -124,7 +124,7 @@ func (c *fakeConsole) reportIDs() int {
 	return len(ids)
 }
 
-func TestAFailedReportIsNotCountedAndIsSentAgain(t *testing.T) {
+func TestAFailedLoneReportIsNotCountedAndANewOneFollows(t *testing.T) {
 	for _, status := range []int{500, 401, reportDrop} {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {
 			captureLogs(t)
@@ -138,13 +138,13 @@ func TestAFailedReportIsNotCountedAndIsSentAgain(t *testing.T) {
 	}
 }
 
-// On the one-event path a report always goes alone; one that fails must not
-// pause events the collector accepts.
+// On the one-event path a report goes alone even when it was taken beside an
+// event; one that fails must not pause events the collector accepts.
 func TestALoneReportThatFailsDoesNotPauseEvents(t *testing.T) {
 	for _, status := range []int{500, reportHang} {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {
 			captureLogs(t)
-			statuses := make([]int, 2*breakerThreshold)
+			statuses := make([]int, 1+2*breakerThreshold)
 			statuses[0] = 400
 			for i := 1; i < len(statuses); i++ {
 				statuses[i] = 202
@@ -152,27 +152,35 @@ func TestALoneReportThatFailsDoesNotPauseEvents(t *testing.T) {
 			s, console := reportSink(t, statuses, status)
 			console.noBatch = http.StatusNotFound
 			s.client.Timeout = 20 * time.Millisecond
-			for n := range 2 * breakerThreshold {
+			sendAll(t, s, 1)
+			s.flushEvery = time.Hour
+			s.reportDue(tenantEvent(0))
+			for n := 1; n <= 2*breakerThreshold; n++ {
 				s.write(tenantEvent(n))
-				waitFor(t, "the event", func() bool { return console.eventCount() == n+1 && idle(s) })
+				s.flush(context.Background())
+				if console.eventCount() != n+1 {
+					t.Fatalf("event %d not sent, after %d report tries", n, console.reportCount())
+				}
 			}
 		})
 	}
 }
 
-// A report due when close begins is not sent (SPEC §11.4.7), even beside the
-// events close sends.
-func TestCloseDropsAReportThatIsDue(t *testing.T) {
+// A report waiting when close begins is not sent (SPEC §11.4.7), even
+// beside the events close sends.
+func TestCloseDropsAWaitingReport(t *testing.T) {
 	captureLogs(t)
-	s, console := reportSink(t, []int{400, 202, 202}, 0)
+	s, console := reportSink(t, []int{400, 202}, 0)
 	sendAll(t, s, 1)
-	s.flushEvery = 200 * time.Millisecond
+	s.flushEvery = time.Hour
+	s.reportDue(tenantEvent(1))
+	if reportIdle(s) {
+		t.Fatal("no report is waiting")
+	}
 	s.write(tenantEvent(1))
-	waitFor(t, "the delivery", func() bool { return !reportIdle(s) })
-	s.write(tenantEvent(2))
 	s.close(context.Background())
-	if console.eventCount() != 3 || console.reportCount() != 0 {
-		t.Errorf("%d events, %d reports sent at close; want 3, 0", console.eventCount(), console.reportCount())
+	if console.eventCount() != 2 || console.reportCount() != 0 {
+		t.Errorf("%d events, %d reports sent at close; want 2, 0", console.eventCount(), console.reportCount())
 	}
 }
 
@@ -436,5 +444,26 @@ func TestASplitBatchKeepsTheNewerReport(t *testing.T) {
 	last := console.reportAt(console.reportCount() - 1)["payload"].(map[string]any)["dropped"].(map[string]any)
 	if got := console.batchSizes(); got[8] != 3 || last["refused"] != float64(2) {
 		t.Errorf("entries per request %v, last report %v; want the retry to carry refused 2", got, last)
+	}
+}
+
+// A 413 split leaves the report alone in a request of its own; it was taken
+// beside an event, so its failure keeps it.
+func TestAReportSplitOffItsEventsIsKept(t *testing.T) {
+	captureLogs(t)
+	s, console := reportSink(t, []int{400, 202, 413, 202, 202}, 500)
+	sendAll(t, s, 1)
+	s.flushEvery = time.Second
+	s.write(tenantEvent(1))
+	waitFor(t, "the delivery", func() bool { return !reportIdle(s) })
+	s.write(tenantEvent(2))
+	waitFor(t, "the split", func() bool { return console.reportCount() == 2+maxRetries && idle(s) })
+	console.mu.Lock()
+	console.reportStatus = 0
+	console.mu.Unlock()
+	s.write(tenantEvent(3))
+	waitFor(t, "the next batch", func() bool { return console.count() == 5 && idle(s) && reportIdle(s) })
+	if got := console.batchSizes(); got[4] != 2 || console.reportIDs() != 1 {
+		t.Errorf("entries per request %v, %d report ids; want the report beside the next event", got, console.reportIDs())
 	}
 }

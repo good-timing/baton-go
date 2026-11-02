@@ -34,7 +34,7 @@ func TestADroppedEventIsCountedOnceUnderItsReason(t *testing.T) {
 			for n := range bufferCap {
 				s.push(testEvent(n + 1))
 			}
-			s.putBack([]*queued{{Event: testEvent(0)}})
+			s.putBack([]*queued{{Event: testEvent(0)}}, false)
 		}},
 		"refused": {dropRefused, func(t *testing.T) {
 			s := fastSink(t, newFakeConsole(t, func(int) int { return http.StatusBadRequest }))

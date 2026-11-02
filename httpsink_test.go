@@ -375,11 +375,11 @@ func TestAFailedEventPutBackIntoAFullBufferIsTheOneDropped(t *testing.T) {
 		s.push(testEvent(n + 1))
 	}
 	failed := []*queued{{Event: testEvent(-1)}, {Event: testEvent(0)}}
-	if s.putBack(failed) != 2 || len(s.queue) != bufferCap || s.queue[0].SequenceNumber != 1 {
+	if s.putBack(failed, false) != 2 || len(s.queue) != bufferCap || s.queue[0].SequenceNumber != 1 {
 		t.Errorf("%d queued, oldest %d", len(s.queue), s.queue[0].SequenceNumber)
 	}
 	s.popFront()
-	if s.putBack(failed) != 1 || s.queue[0].SequenceNumber != 0 {
+	if s.putBack(failed, false) != 1 || s.queue[0].SequenceNumber != 0 {
 		t.Errorf("oldest %d", s.queue[0].SequenceNumber)
 	}
 }
