@@ -37,13 +37,18 @@ func newVectorServer() *mcp.Server {
 
 func connect(t *testing.T, server *mcp.Server) *mcp.ClientSession {
 	t.Helper()
+	return connectWith(t, server, nil)
+}
+
+func connectWith(t *testing.T, server *mcp.Server, opts *mcp.ClientOptions) *mcp.ClientSession {
+	t.Helper()
 	ctx := context.Background()
 	clientSide, serverSide := mcp.NewInMemoryTransports()
 	if _, err := server.Connect(ctx, serverSide, nil); err != nil {
 		t.Fatal(err)
 	}
-	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1"}, nil)
-	cs, err := client.Connect(ctx, clientSide, nil)
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1"}, opts)
+	cs, err := client.Connect(ctx, clientSide, clientOptions(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,6 +130,52 @@ var vectorCases = []vectorCase{
 
 // annotation.json is a note, which current producers no longer send.
 var notEmittedHere = []string{"annotation"}
+
+// clientOptions asks for the protocol in BATON_TEST_MCP_PROTOCOL, so CI can run
+// the newest go-sdk against clients of both protocols. The field is exported
+// only from go-sdk v1.8, so it is set by name.
+func clientOptions(t *testing.T) *mcp.ClientSessionOptions {
+	t.Helper()
+	version := os.Getenv("BATON_TEST_MCP_PROTOCOL")
+	if version == "" {
+		return nil
+	}
+	opts := &mcp.ClientSessionOptions{}
+	f := structField(opts, "ProtocolVersion")
+	if !f.CanSet() {
+		t.Fatalf("this go-sdk cannot ask for protocol %s", version)
+	}
+	f.SetString(version)
+	return opts
+}
+
+// goSDKv17 is go-sdk v1.7 or later, told by a field it added: a test binary
+// carries no module versions.
+func goSDKv17() bool {
+	return structField(&mcp.CallToolResult{}, "InputRequests").IsValid()
+}
+
+// newProtocol is MCP 2026-07-28 or later, which has no handshake and no
+// Mcp-Session-Id (SEP-2567), and puts the client's info in each request's _meta.
+func newProtocol(cs *mcp.ClientSession) bool {
+	return cs.InitializeResult().ProtocolVersion >= "2026-07-28"
+}
+
+// vendorMeta is runtime_meta without the keys a 2026-07-28 client writes on
+// every request, for tests about the vendor's own keys. They are forwarded
+// with the rest (TestProtocolMetaIsForwarded).
+func vendorMeta(meta map[string]any) any {
+	out := map[string]any{}
+	for k, v := range meta {
+		if !strings.HasPrefix(k, "io.modelcontextprotocol/") {
+			out[k] = v
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
 
 // SPEC §11.4.6.
 var exemptEnvelope = []string{"event_id", "session_id", "captured_at", "call_id", "sdk_version", "agent_runtime", "client_observed", "transport_observed"}
@@ -224,6 +275,9 @@ func TestEventsMatchVectors(t *testing.T) {
 			}
 			if got["sdk_version"] != sdkVersion {
 				t.Errorf("sdk_version = %v, want %s", got["sdk_version"], sdkVersion)
+			}
+			if meta, ok := got["runtime_meta"].(map[string]any); ok {
+				got["runtime_meta"] = vendorMeta(meta)
 			}
 			for _, side := range []map[string]any{want, got} {
 				for _, k := range exemptEnvelope {

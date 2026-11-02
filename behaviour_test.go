@@ -62,7 +62,7 @@ func serveHTTP(t *testing.T, server *mcp.Server, sse bool, opts *mcp.StreamableH
 func connectOver(t *testing.T, transport mcp.Transport) *mcp.ClientSession {
 	t.Helper()
 	client := mcp.NewClient(&mcp.Implementation{Name: "c", Version: "1"}, nil)
-	cs, err := client.Connect(context.Background(), transport, nil)
+	cs, err := client.Connect(context.Background(), transport, clientOptions(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,8 +145,25 @@ func TestInstructionsGoAfterTheVendors(t *testing.T) {
 	}
 }
 
-// go-sdk's stateless mode still issues an Mcp-Session-Id the client echoes,
-// unless the vendor's GetSessionID returns "". Both must work.
+// SPEC §3.4 rung 4: the Mcp-Session-Id a stateful server issues is the session.
+func TestStatefulHTTPUsesTheSessionID(t *testing.T) {
+	server, sink := installWithSink(t, Config{}, addLookup)
+	cs := connectOver(t, &mcp.StreamableClientTransport{Endpoint: serveHTTP(t, server, false, nil)})
+	if cs.ID() == "" {
+		t.Skip("no Mcp-Session-Id was issued")
+	}
+	for range 2 {
+		call(t, cs, "lookup", map[string]any{"name": "a"})
+	}
+	for _, e := range ofType(sink.all(), "tool_call_start") {
+		if e.SessionID != cs.ID() || e.SessionIDOrigin == nil || *e.SessionIDOrigin != "observed" {
+			t.Errorf("session %q (%v), want %q observed", e.SessionID, e.SessionIDOrigin, cs.ID())
+		}
+	}
+}
+
+// go-sdk's stateless mode issues an Mcp-Session-Id the client echoes, unless
+// GetSessionID returns "" or go-sdk is v1.7+, which issues none. Both must work.
 func TestStatelessHTTP(t *testing.T) {
 	for name, c := range map[string]struct {
 		getSessionID func() string
@@ -161,6 +178,9 @@ func TestStatelessHTTP(t *testing.T) {
 			addLookup(server)
 			sink := installOn(t, server, Config{ReportMode: "on"})
 			cs := connectOver(t, &mcp.StreamableClientTransport{Endpoint: serveHTTP(t, server, false, &mcp.StreamableHTTPOptions{Stateless: true})})
+			if c.getSessionID == nil && goSDKv17() {
+				c.sessions, c.origin = 3, "minted"
+			}
 
 			tools, err := cs.ListTools(context.Background(), nil)
 			if err != nil {

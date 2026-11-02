@@ -12,7 +12,7 @@ This is the Go SDK, for servers built on the official [Go MCP SDK](https://githu
 go get github.com/good-timing/baton-go
 ```
 
-Go 1.25+, and `github.com/modelcontextprotocol/go-sdk` v1.6.1 or later in v1. If your server is on an older go-sdk, `go get` moves it up to v1.6.1.
+Go 1.25+, and `github.com/modelcontextprotocol/go-sdk` v1.6.1 or later in v1. If your server is on an older go-sdk, `go get` moves it up to v1.6.1; a newer one stays where it is. Tested on v1.6.1, v1.7.0 and v1.8.0, and on v1.8.0 with clients of both MCP protocols (2025-11-25 and 2026-07-28).
 
 ## Quickstart
 

@@ -42,41 +42,57 @@ func probeServer(server *mcp.Server) (serverMeta, error) {
 	}
 	defer conn.Close()
 
-	id, _ := jsonrpc.MakeID(float64(1))
-	params, _ := json.Marshal(&mcp.InitializeParams{
-		ProtocolVersion: "2025-11-25",
-		ClientInfo:      &mcp.Implementation{Name: "baton-probe", Version: Version},
-		Capabilities:    &mcp.ClientCapabilities{},
-	})
-	if err := conn.Write(ctx, &jsonrpc.Request{ID: id, Method: "initialize", Params: params}); err != nil {
+	resp, err := rawRequest(ctx, conn, 1, "initialize", initializeParams("baton-probe"))
+	if err != nil {
 		return serverMeta{}, err
+	}
+	if resp.Error != nil {
+		return serverMeta{ioConnType: ioConnType}, resp.Error
+	}
+	var result mcp.InitializeResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		return serverMeta{ioConnType: ioConnType}, err
+	}
+	if result.ServerInfo == nil {
+		return serverMeta{ioConnType: ioConnType}, errors.New("initialize answered with no serverInfo")
+	}
+	return serverMeta{
+		ioConnType:   ioConnType,
+		name:         result.ServerInfo.Name,
+		serverInfo:   jsonValue(result.ServerInfo),
+		capabilities: jsonValue(result.Capabilities),
+		instructions: result.Instructions,
+	}, nil
+}
+
+// initializeParams asks for 2025-11-25, which every supported go-sdk answers
+// with an initialize result.
+func initializeParams(client string) *mcp.InitializeParams {
+	return &mcp.InitializeParams{
+		ProtocolVersion: "2025-11-25",
+		ClientInfo:      &mcp.Implementation{Name: client, Version: Version},
+		Capabilities:    &mcp.ClientCapabilities{},
+	}
+}
+
+// rawRequest sends one JSON-RPC request on conn and waits for its answer.
+func rawRequest(ctx context.Context, conn mcp.Connection, n int64, method string, params any) (*jsonrpc.Response, error) {
+	id, _ := jsonrpc.MakeID(float64(n))
+	raw, err := json.Marshal(params)
+	if err != nil {
+		return nil, err
+	}
+	if err := conn.Write(ctx, &jsonrpc.Request{ID: id, Method: method, Params: raw}); err != nil {
+		return nil, err
 	}
 	for {
 		msg, err := conn.Read(ctx)
 		if err != nil {
-			return serverMeta{}, err
+			return nil, err
 		}
-		resp, ok := msg.(*jsonrpc.Response)
-		if !ok || resp.ID != id {
-			continue
+		if resp, ok := msg.(*jsonrpc.Response); ok && resp.ID == id {
+			return resp, nil
 		}
-		if resp.Error != nil {
-			return serverMeta{ioConnType: ioConnType}, resp.Error
-		}
-		var result mcp.InitializeResult
-		if err := json.Unmarshal(resp.Result, &result); err != nil {
-			return serverMeta{ioConnType: ioConnType}, err
-		}
-		if result.ServerInfo == nil {
-			return serverMeta{ioConnType: ioConnType}, errors.New("initialize answered with no serverInfo")
-		}
-		return serverMeta{
-			ioConnType:   ioConnType,
-			name:         result.ServerInfo.Name,
-			serverInfo:   jsonValue(result.ServerInfo),
-			capabilities: jsonValue(result.Capabilities),
-			instructions: result.Instructions,
-		}, nil
 	}
 }
 

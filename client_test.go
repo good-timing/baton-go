@@ -108,8 +108,9 @@ func TestOnlyRegisteredHeadersAreCopied(t *testing.T) {
 		cs := connectWithHeaders(t, url, headers)
 		call(t, cs, "lookup", map[string]any{"name": "alice"})
 		observed := clientOf(t, ofType(sink.all(), "tool_call_start")[0])
-		if _, hasInfo := observed["info"]; hasInfo == stateless {
-			t.Errorf("stateless=%v: info %v (a stateless request has no handshake)", stateless, observed["info"])
+		// A stateless request has no handshake; on the new protocol the request says.
+		if _, hasInfo := observed["info"]; hasInfo != (!stateless || newProtocol(cs)) {
+			t.Errorf("stateless=%v: info %v", stateless, observed["info"])
 		}
 		got, _ := observed["headers"].(map[string]any)
 		ua, _ := got["user-agent"].(string)
@@ -299,7 +300,8 @@ func TestAScrubberThatPanicsBeforeTheEventCostsOnlyThatValue(t *testing.T) {
 	}
 	for _, e := range asJSON(t, starts) {
 		p := e["payload"].(map[string]any)
-		if e["runtime_meta"] != nil || p["call_intent"] != nil || p["params"] == nil || e["client_observed"] == nil {
+		meta, _ := e["runtime_meta"].(map[string]any)
+		if vendorMeta(meta) != nil || p["call_intent"] != nil || p["params"] == nil || e["client_observed"] == nil {
 			t.Errorf("start %v", e)
 		}
 	}

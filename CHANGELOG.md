@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+- **Works on go-sdk v1.7 and v1.8, as well as v1.6.1.** go.mod still
+  requires v1.6.1, so installing this package does not move your go-sdk.
+  CI tests v1.6.1 and v1.7.0, and v1.8.0 with a client of each protocol.
+  - **A tool that returns no result no longer crashes your server on
+    go-sdk v1.7+.** There go-sdk panics on a nil result when the client
+    speaks MCP 2026-07-28, even without Baton. Baton now sends
+    `{"content": []}` instead, as go-sdk's typed `AddTool` does. This is on
+    every go-sdk version: on v1.6.1 the result was `null` before.
+  - **Baton's text is added to the server instructions on `server/discover`
+    too.** A 2026-07-28 client asks there, not on `initialize`, so before
+    it never saw the sentence that tells a subagent to number its calls,
+    nor the pointer to the annotation tool.
+  - **A call that pauses for the client's input (go-sdk v1.7+) is one call,**
+    as in `baton-sdk`: the paused round sends no `tool_call_end`, and the
+    round that resumes it sends no new `tool_call_start`. With a 2026-07-28
+    client the rounds are separate requests, so its start and its end carry
+    different `call_id`s (SPEC §13, 0.8.0).
+  - On the new protocol, and on any stateless server on go-sdk v1.7+, each
+    HTTP request is its own session (SPEC §3.4). `runtime_meta` carries the
+    `io.modelcontextprotocol/` keys a 2026-07-28 client writes (SPEC §5.2).
+
 ## 0.1.1
 
 - **The HTTP sink sends a `client_report` event (SPEC §11.4.7) with this

@@ -21,12 +21,14 @@ import (
 func (b *installed) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 		switch method {
-		case "initialize":
+		case "initialize", "server/discover":
 			res, err := next(ctx, method, req)
-			if r, ok := res.(*mcp.InitializeResult); ok && err == nil {
+			if err == nil {
 				guard("instructions", func() {
-					if l, ok := b.vendorTools(ctx, next, req); ok {
-						b.addInstructions(r, l)
+					if instructions := instructionsOf(res); instructions != nil {
+						if l, ok := b.vendorTools(ctx, next, req); ok {
+							b.addInstructions(instructions, l)
+						}
 					}
 				})
 			}
@@ -107,13 +109,13 @@ func (b *installed) ourInstructions(l listing) string {
 
 // addInstructions puts Baton's paragraph after the vendor's own text in this
 // response (SPEC §5.1.2).
-func (b *installed) addInstructions(r *mcp.InitializeResult, l listing) {
+func (b *installed) addInstructions(instructions *string, l listing) {
 	ours := b.ourInstructions(l)
 	if ours == "" {
 		return
 	}
-	r.Instructions = withVendorInstructions(r.Instructions, ours)
-	if n := utf8.RuneCountInString(r.Instructions); n > claudeCodeTruncCap {
+	*instructions = withVendorInstructions(*instructions, ours)
+	if n := utf8.RuneCountInString(*instructions); n > claudeCodeTruncCap {
 		b.truncationWarned.Do(func() {
 			slog.Warn("baton: the server instructions are longer than Claude Code keeps; the end of Baton's text is lost there",
 				"chars", n, "cap", claudeCodeTruncCap)
@@ -258,33 +260,43 @@ func (b *installed) toolCall(ctx context.Context, next mcp.MethodHandler, method
 	}
 
 	var (
-		cc      callContext
-		started bool
+		cc    callContext
+		ready bool
 	)
 	tool := l.find(r.Params.Name)
 	// With no listing, a tool is not assumed missing.
 	known := tool != nil || !listed
+	// As in baton-sdk, a round that resumes a paused call is not a new start,
+	// and a paused round is not an end.
+	resuming := resumesAPause(r.Params)
 	guard("tool_call_start", func() {
 		params, goal := b.stripGoalParams(r, tool)
 		cc = b.newCallContext(ctx, r)
 		cc.callID = uuid7()
-		if listed {
-			b.maybeSnapshot(l)
+		if !resuming {
+			if listed {
+				b.maybeSnapshot(l)
+			}
+			start := toolCallStart{ToolName: r.Params.Name, Params: b.scrubParams(params), CallIntent: b.scrubOptionalOrNil(goal, userGoalParam)}
+			if start.CallIntent != nil {
+				start.IntentSource = ptr(intentSourceParam)
+			}
+			b.emit(cc, "tool_call_start", start)
 		}
-		start := toolCallStart{ToolName: r.Params.Name, Params: b.scrubParams(params), CallIntent: b.scrubOptionalOrNil(goal, userGoalParam)}
-		if start.CallIntent != nil {
-			start.IntentSource = ptr(intentSourceParam)
-		}
-		b.emit(cc, "tool_call_start", start)
-		started = true
+		ready = true
 	})
 
 	began := time.Now()
 	res, err := next(ctx, method, r)
 	elapsed := time.Since(began).Milliseconds()
 
-	if started {
+	if ready && !paused(res) {
 		guard("tool_call_end", func() { b.emitOutcome(cc, r.Params.Name, known, res, err, elapsed) })
+	}
+	// go-sdk v1.7+ panics on a nil result under MCP 2026-07-28; its typed
+	// AddTool sends an empty one (TestAHandlerReturningNothingStillEnds).
+	if result, ok := res.(*mcp.CallToolResult); err == nil && (res == nil || ok && result == nil) {
+		res = &mcp.CallToolResult{Content: []mcp.Content{}}
 	}
 	return res, err
 }

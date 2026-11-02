@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -87,7 +89,7 @@ func TestMetaCoordinatesAreRounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	meta, _ := json.Marshal(ofType(sink.all(), "tool_call_start")[0].RuntimeMeta)
+	meta, _ := json.Marshal(vendorMeta(ofType(sink.all(), "tool_call_start")[0].RuntimeMeta))
 	want := `{"openai/userLocation":{"city":"SF","latitude":37.8,"longitude":"-122.4","zoom":12}}`
 	if string(meta) != want {
 		t.Errorf("runtime_meta = %s, want %s", meta, want)
@@ -228,11 +230,60 @@ func TestAHandlerReturningNothingStillEnds(t *testing.T) {
 		s.AddTool(&mcp.Tool{Name: "empty", InputSchema: json.RawMessage(`{"type":"object"}`)},
 			func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) { return nil, nil })
 	})
-	cs := connect(t, server)
-	_, _ = cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "empty"})
-	if n := len(ofType(sink.all(), "tool_call_end")) + len(ofType(sink.all(), "tool_call_error")); n != 1 {
-		t.Errorf("want one end or error, got %d", n)
+	raw := newRawSession(t, server)
+	raw.request("initialize", initializeParams("c"))
+	resp := raw.request("tools/call", &mcp.CallToolParams{Name: "empty", Arguments: map[string]any{}})
+	if resp.Error != nil || !strings.Contains(string(resp.Result), `"content":[]`) {
+		t.Errorf("result %s, error %v; want content []", resp.Result, resp.Error)
 	}
+	// The default client speaks 2026-07-28 on go-sdk v1.7+, where the nil crashed.
+	if _, err := connect(t, server).CallTool(context.Background(), &mcp.CallToolParams{Name: "empty", Arguments: map[string]any{}}); err != nil {
+		t.Error(err)
+	}
+	if n := len(ofType(sink.all(), "tool_call_end")) + len(ofType(sink.all(), "tool_call_error")); n != 2 {
+		t.Errorf("want one end or error per call, got %d", n)
+	}
+}
+
+// go-sdk v1.6 answers a second initialize; v1.7+ refuses it with a nil result.
+func TestASecondInitializeIsNotACrash(t *testing.T) {
+	server, _ := installWithSink(t, Config{}, addLookup)
+	raw := newRawSession(t, server)
+	raw.request("initialize", initializeParams("c"))
+	raw.request("initialize", initializeParams("c"))
+}
+
+// rawSession speaks JSON-RPC to a server directly, to see what goes on the wire.
+type rawSession struct {
+	t    *testing.T
+	conn mcp.Connection
+	ids  int64
+}
+
+func newRawSession(t *testing.T, server *mcp.Server) *rawSession {
+	t.Helper()
+	clientSide, serverSide := mcp.NewInMemoryTransports()
+	if _, err := server.Connect(context.Background(), serverSide, nil); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := clientSide.Connect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	return &rawSession{t: t, conn: conn}
+}
+
+func (s *rawSession) request(method string, params any) *jsonrpc.Response {
+	s.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.ids++
+	resp, err := rawRequest(ctx, s.conn, s.ids, method, params)
+	if err != nil {
+		s.t.Fatalf("%s: %v", method, err)
+	}
+	return resp
 }
 
 func TestCoordinatesRoundLikePython(t *testing.T) {
@@ -337,5 +388,20 @@ func TestErrorTypeLooksThroughFmtWrappers(t *testing.T) {
 		if got := errorType(err); got != want {
 			t.Errorf("%v: %s, want %s", err, got, want)
 		}
+	}
+}
+
+// runtime_meta forwards _meta unchanged (SPEC §5.2), the keys a 2026-07-28
+// client writes included.
+func TestProtocolMetaIsForwarded(t *testing.T) {
+	server, sink := installWithSink(t, Config{Scrubber: NoScrub}, addLookup)
+	cs := connect(t, server)
+	if !newProtocol(cs) {
+		t.Skip("this client does not use MCP 2026-07-28")
+	}
+	call(t, cs, "lookup", map[string]any{"name": "a"})
+	meta := ofType(sink.all(), "tool_call_start")[0].RuntimeMeta
+	if meta["io.modelcontextprotocol/protocolVersion"] != cs.InitializeResult().ProtocolVersion {
+		t.Errorf("runtime_meta = %v", meta)
 	}
 }

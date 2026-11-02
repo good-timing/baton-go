@@ -33,16 +33,32 @@ jobs:
           fi
 
   test:
+    # go.mod requires go-sdk's floor, which is what a vendor on it builds with.
+    # v1.7.0 can only test a 2026-07-28 client; v1.8.0 runs with a client of each.
+    name: test (go-sdk ${{ matrix.go-sdk }}${{ matrix.protocol && format(', client protocol {0}', matrix.protocol) || '' }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - go-sdk: floor
+          - go-sdk: v1.7.0
+          - go-sdk: v1.8.0
+          - go-sdk: v1.8.0
+            protocol: "2025-11-25"
+    env:
+      BATON_TEST_MCP_PROTOCOL: ${{ matrix.protocol }}
     steps:
       - uses: actions/checkout@v5
         with:
           submodules: true
           persist-credentials: false
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      - if: matrix.go-sdk != 'floor'
+        run: go get github.com/modelcontextprotocol/go-sdk@${{ matrix.go-sdk }} && go mod tidy
       - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - run: go vet ./...
       - run: go test -race ./...
