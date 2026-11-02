@@ -1138,11 +1138,13 @@ func TestAnEventDroppedWhileItIsEncodedLeavesNoBytesBehind(t *testing.T) {
 		s.write(testEvent(n)) // the last pushes the slow one out
 	}
 	close(slow.release)
-	waitFor(t, "the full batches", func() bool { return console.eventCount() == bufferCap })
+	// The drop makes a report due, which may take one place in a batch.
+	waitFor(t, "the full batches", func() bool { return console.eventCount() >= bufferCap-1 })
+	sent := console.eventCount()
 	s.write(bigEvent(1000, 400_000))
 	s.write(bigEvent(1001, 400_000))
 	time.Sleep(100 * time.Millisecond)
-	if console.eventCount() != bufferCap {
+	if console.eventCount() != sent {
 		t.Errorf("two events under the byte cap went before their time")
 	}
 	s.close(context.Background())

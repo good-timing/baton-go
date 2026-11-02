@@ -355,8 +355,14 @@ func (s *httpSink) nextBatch(force bool) ([]*queued, time.Duration) {
 
 	var batch, unencodable, oversize []*queued
 	size := batchFrame - 1
+	// A due report takes one of the batch's places (SPEC §11.4.7), or it
+	// would never go while events fill every batch.
+	places, room := batchCap, batchBytes
+	if r := s.report; r != nil && r.body != nil {
+		places, room = batchCap-1, batchBytes-r.cost()
+	}
 take:
-	for len(s.queue) > 0 && len(batch) < batchCap {
+	for len(s.queue) > 0 && len(batch) < places {
 		q := s.queue[0]
 		switch {
 		case q.body == nil && q.encodeErr == nil:
@@ -365,7 +371,7 @@ take:
 			unencodable = append(unencodable, q)
 		case batchFrame-1+q.cost() > batchBytes:
 			oversize = append(oversize, q)
-		case size+q.cost() > batchBytes:
+		case size+q.cost() > room:
 			break take
 		default:
 			batch = append(batch, q)
@@ -374,11 +380,8 @@ take:
 		s.popFront()
 	}
 	if report := s.report; report != nil {
-		switch {
-		case report.body == nil:
-			s.report = nil
-		case len(batch) < batchCap && size+report.cost() <= batchBytes:
-			s.report = nil
+		s.report = nil
+		if report.body != nil {
 			batch = append(batch, report)
 		}
 	}

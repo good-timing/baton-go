@@ -334,3 +334,38 @@ func TestABatchKeptAfterCloseBeganLosesItsReport(t *testing.T) {
 		t.Errorf("entries per request %v; want the last try at close without the report", got)
 	}
 }
+
+func TestADueReportTakesAPlaceInABatchFullByCount(t *testing.T) {
+	captureLogs(t)
+	s, console := reportSink(t, []int{400, 202, 202, 202, 202, 202}, 0)
+	sendAll(t, s, 1)
+	s.flushEvery = time.Second
+	s.write(tenantEvent(1))
+	waitFor(t, "the delivery", func() bool { return !reportIdle(s) })
+	for i := range 3 * batchCap {
+		s.write(tenantEvent(2 + i))
+	}
+	waitFor(t, "every event", func() bool { return console.eventCount() == 2+3*batchCap && idle(s) && reportIdle(s) })
+	if console.reportCount() != 1 || console.reportsAlone != 0 || console.batchSizes()[2] != batchCap {
+		t.Errorf("%d reports, %d alone, entries per request %v; want the report in the first full batch",
+			console.reportCount(), console.reportsAlone, console.batchSizes())
+	}
+}
+
+func TestADueReportKeepsByteRoomInABatch(t *testing.T) {
+	captureLogs(t)
+	s, console := reportSink(t, []int{400, 202, 202, 202, 202}, 0)
+	sendAll(t, s, 1)
+	s.flushEvery = time.Second
+	s.write(tenantEvent(1))
+	waitFor(t, "the delivery", func() bool { return !reportIdle(s) })
+	// Two of these fill a batch to 10 bytes under the cap, with no room for the report.
+	probe, _ := encodeEvent(bigEvent(2, 0))
+	size := (batchBytes-(batchFrame-1)-10)/2 - 1 - len(probe)
+	s.write(bigEvent(2, size))
+	s.write(bigEvent(3, size))
+	waitFor(t, "every event", func() bool { return console.eventCount() == 4 && idle(s) && reportIdle(s) })
+	if got := console.batchSizes(); !slices.Equal(got, []int{1, 1, 2, 1}) {
+		t.Errorf("entries per request %v, want [1 1 2 1]: one event beside the report, then the other", got)
+	}
+}
