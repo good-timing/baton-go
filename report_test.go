@@ -124,17 +124,55 @@ func (c *fakeConsole) reportIDs() int {
 	return len(ids)
 }
 
-func TestAFailedReportIsNotCountedAndIsSentAgain(t *testing.T) {
-	for _, status := range []int{500, 401, reportDrop} {
+// sendBesideAFailedReport delivers an event whose report then fails alone,
+// and returns when the next event's batch is done.
+func sendBesideAFailedReport(t *testing.T, s *httpSink, console *fakeConsole) {
+	t.Helper()
+	sendAll(t, s, 1)
+	s.write(tenantEvent(1))
+	waitFor(t, "the report's tries", func() bool { return console.reportCount() == maxRetries+1 && idle(s) })
+	time.Sleep(50 * time.Millisecond)
+	if console.reportCount() != maxRetries+1 {
+		t.Fatalf("%d tries of the report alone, want %d: a kept report waits for an event", console.reportCount(), maxRetries+1)
+	}
+	s.write(tenantEvent(2))
+	waitFor(t, "the next batch", func() bool { return console.eventCount() == 3 && idle(s) && reportIdle(s) })
+}
+
+func TestAReportThatFailsAloneRidesTheNextBatch(t *testing.T) {
+	for _, status := range []int{500, reportDrop} {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {
 			captureLogs(t)
 			s, console := reportSink(t, []int{400, 202, 202}, status)
-			s.reportEvery = 0
-			sendAll(t, s, 3)
-			if console.reportIDs() != 2 || processDrops.totals()[dropRefused] != 1 || len(processDrops.totals()) != 1 {
-				t.Errorf("%d reports, counts %v", console.reportIDs(), processDrops.totals())
+			sendBesideAFailedReport(t, s, console)
+			if console.reportIDs() != 1 || console.batchSizes()[2] != 2 || len(processDrops.totals()) != 1 {
+				t.Errorf("%d report ids, entries per request %v, counts %v; want the one report beside the event",
+					console.reportIDs(), console.batchSizes(), processDrops.totals())
 			}
 		})
+	}
+}
+
+func TestAReportRefusedAloneIsNotCountedAndIsSentAgain(t *testing.T) {
+	captureLogs(t)
+	s, console := reportSink(t, []int{400, 202, 202}, 401)
+	s.reportEvery = 0
+	sendAll(t, s, 3)
+	if console.reportIDs() != 2 || processDrops.totals()[dropRefused] != 1 || len(processDrops.totals()) != 1 {
+		t.Errorf("%d reports, counts %v", console.reportIDs(), processDrops.totals())
+	}
+}
+
+func TestCloseDropsAReportThatFailedAlone(t *testing.T) {
+	captureLogs(t)
+	s, console := reportSink(t, []int{400, 202}, 500)
+	sendAll(t, s, 1)
+	s.write(tenantEvent(1))
+	waitFor(t, "the report's tries", func() bool { return console.reportCount() == maxRetries+1 && idle(s) })
+	start := time.Now()
+	s.close(context.Background())
+	if took := time.Since(start); took > 500*time.Millisecond || console.reportCount() != maxRetries+1 {
+		t.Errorf("close took %v, %d report tries", took, console.reportCount())
 	}
 }
 
@@ -259,11 +297,10 @@ func TestCloseEndsAReportBeingSent(t *testing.T) {
 func TestAReportThatGetsNoAnswerTimesOut(t *testing.T) {
 	captureLogs(t)
 	s, console := reportSink(t, []int{400, 202, 202}, reportHang)
-	s.reportEvery = 0
 	s.client.Timeout = 20 * time.Millisecond
-	sendAll(t, s, 3)
-	if console.reportIDs() != 2 {
-		t.Errorf("%d reports, want 2", console.reportIDs())
+	sendBesideAFailedReport(t, s, console)
+	if console.reportIDs() != 1 || console.batchSizes()[2] != 2 {
+		t.Errorf("%d report ids, entries per request %v", console.reportIDs(), console.batchSizes())
 	}
 }
 
@@ -367,5 +404,36 @@ func TestADueReportKeepsByteRoomInABatch(t *testing.T) {
 	waitFor(t, "every event", func() bool { return console.eventCount() == 4 && idle(s) && reportIdle(s) })
 	if got := console.batchSizes(); !slices.Equal(got, []int{1, 1, 2, 1}) {
 		t.Errorf("entries per request %v, want [1 1 2 1]: one event beside the report, then the other", got)
+	}
+}
+
+// The report built when the first half of a split batch is delivered has the
+// newer totals; the older one the second half carried must not replace it.
+func TestASplitBatchKeepsTheNewerReport(t *testing.T) {
+	captureLogs(t)
+	s, console := reportSink(t, nil, 0)
+	console.answer = func(n int) int {
+		switch {
+		case n == 0:
+			return 400
+		case n >= 4 && n <= 7:
+			return 500
+		}
+		return 202
+	}
+	console.maxEvents = 4
+	console.refuse = func(e map[string]any) bool { return e["sequence_number"] == 2.0 }
+	s.reportEvery = 0
+	sendAll(t, s, 1)
+	s.flushEvery = 200 * time.Millisecond
+	s.write(tenantEvent(1))
+	waitFor(t, "the delivery", func() bool { return !reportIdle(s) })
+	for n := 2; n <= 5; n++ {
+		s.write(tenantEvent(n))
+	}
+	waitFor(t, "the retry", func() bool { return console.count() == 9 && idle(s) })
+	last := console.reportAt(console.reportCount() - 1)["payload"].(map[string]any)["dropped"].(map[string]any)
+	if got := console.batchSizes(); got[8] != 3 || last["refused"] != float64(2) {
+		t.Errorf("entries per request %v, last report %v; want the retry to carry refused 2", got, last)
 	}
 }

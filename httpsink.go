@@ -54,6 +54,9 @@ type queued struct {
 	encodeErr error
 	isReport  bool
 	reportSum int
+	// A report whose send failed waits for an event to ride with, so a
+	// collector failing reports alone does not get one every interval.
+	failed bool
 }
 
 // cost is the bytes q adds to a batch body, with its comma.
@@ -186,9 +189,10 @@ func (s *httpSink) putBack(batch []*queued) int {
 			events = append(events, q)
 		}
 	}
-	// A report that failed alone is not kept: retrying it would count toward
-	// the breaker, which pauses the events.
-	if report != nil && len(events) > 0 && !s.closed {
+	// A report built after this one, when part of the batch was delivered,
+	// has the newer totals.
+	if report != nil && s.report == nil && !s.closed {
+		report.failed = true
 		s.report = report
 	}
 	over := max(0, len(s.queue)+len(events)-bufferCap)
@@ -339,7 +343,7 @@ func (s *httpSink) nextBatch(force bool) ([]*queued, time.Duration) {
 	s.sizeNew()
 	s.mu.Lock()
 	// Once close has given up, what is queued is close's to count.
-	if s.ctx.Err() != nil || len(s.queue) == 0 && s.report == nil {
+	if s.ctx.Err() != nil || len(s.queue) == 0 && (s.report == nil || s.report.failed) {
 		s.mu.Unlock()
 		return nil, 0
 	}
