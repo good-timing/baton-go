@@ -173,10 +173,11 @@ func (s *httpSink) push(e Event) bool {
 }
 
 // putBack returns a failed batch, which is older than everything queued, to
-// the front, and its report to s.report unless the report was taken alone:
-// with no events, or on the one-event path. When that overfills the queue,
-// the batch's oldest are the ones dropped. It returns how many it dropped.
-// The caller holds s.mu.
+// the front, and its report to s.report unless takenAlone: the report was
+// taken with no events, or the sink sends one event per request by the time
+// the batch fails (read after the send, so a 404 during it counts). When
+// that overfills the queue, the batch's oldest are the ones dropped. It
+// returns how many it dropped. The caller holds s.mu.
 func (s *httpSink) putBack(batch []*queued, takenAlone bool) int {
 	events := make([]*queued, 0, len(batch))
 	var report *queued
@@ -187,10 +188,9 @@ func (s *httpSink) putBack(batch []*queued, takenAlone bool) int {
 			events = append(events, q)
 		}
 	}
-	// A report taken with no events, or on the one-event path, is not kept,
-	// or it would be sent alone again and again to a collector that fails
-	// it. A report built after this one, when part of the batch was
-	// delivered, has the newer totals.
+	// A report taken alone would be sent alone again and again to a collector
+	// that fails it. A report built after this one, when part of the batch
+	// was delivered, has the newer totals.
 	if report != nil && !takenAlone && s.report == nil && !s.closed {
 		s.report = report
 	}
@@ -275,6 +275,7 @@ func (s *httpSink) drain(force bool) time.Duration {
 		stopped := failed && s.ctx.Err() != nil
 		dropped := 0
 		if failed && !stopped {
+			// The batch taken, not kept: a report a 413 split left alone is kept.
 			dropped = s.putBack(kept, s.single || countEvents(batch) == 0)
 		}
 		s.mu.Unlock()
