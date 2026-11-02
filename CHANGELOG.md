@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.2
 
 - **Works on go-sdk v1.7 and v1.8, as well as v1.6.1.** go.mod still
   requires v1.6.1, so installing this package does not move your go-sdk.
@@ -22,6 +22,11 @@
   - On the new protocol, and on any stateless server on go-sdk v1.7+, each
     HTTP request is its own session (SPEC §3.4). `runtime_meta` carries the
     `io.modelcontextprotocol/` keys a 2026-07-28 client writes (SPEC §5.2).
+
+- **A client that still sends the retired `expected_result` or
+  `overall_task` has them recorded as `call_expected` and `call_workflow`**
+  (SPEC §13, 0.8.22). Before, Go removed them from the arguments but dropped
+  the values, so the turn number in `overall_task` never reached the Console.
 
 ## 0.1.1
 
