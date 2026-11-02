@@ -28,23 +28,26 @@ type shutdownStep struct {
 }
 
 type shutdownScenario struct {
-	Name    string         `json:"name"`
-	Mode    string         `json:"mode"`
-	DelayMS int            `json:"delay_ms"`
-	Steps   []shutdownStep `json:"steps"`
-	Expect  struct {
+	Name     string          `json:"name"`
+	Mode     string          `json:"mode"`
+	DelayMS  int             `json:"delay_ms"`
+	Settings json.RawMessage `json:"settings"`
+	Steps    []shutdownStep  `json:"steps"`
+	Expect   struct {
 		Dropped            map[dropReason]int `json:"dropped"`
 		WarningsAfterClose *int               `json:"warnings_after_close"`
 	} `json:"expect"`
 }
 
+type shutdownSettings struct {
+	RequestTimeoutMS int `json:"request_timeout_ms"`
+	ShutdownBudgetMS int `json:"shutdown_budget_ms"`
+	BackoffBaseMS    int `json:"backoff_base_ms"`
+}
+
 type shutdownSpec struct {
-	Settings struct {
-		RequestTimeoutMS int `json:"request_timeout_ms"`
-		ShutdownBudgetMS int `json:"shutdown_budget_ms"`
-		BackoffBaseMS    int `json:"backoff_base_ms"`
-	} `json:"settings"`
-	Limits struct {
+	Settings shutdownSettings `json:"settings"`
+	Limits   struct {
 		CallMS        int `json:"call_ms"`
 		CloseMarginMS int `json:"close_margin_ms"`
 	} `json:"limits"`
@@ -121,27 +124,35 @@ func TestShutdownScenarios(t *testing.T) {
 	var spec shutdownSpec
 	readScenarios(t, "shutdown.json", &spec)
 	ms := func(n int) time.Duration { return time.Duration(n) * time.Millisecond }
-	closeLimit := ms(spec.Settings.ShutdownBudgetMS + spec.Limits.CloseMarginMS)
 	for _, sc := range spec.Scenarios {
 		t.Run(sc.Name, func(t *testing.T) {
 			if why, ok := shutdownNotRun[sc.Name]; ok {
 				t.Skip(why)
 			}
+			settings := spec.Settings
+			if sc.Settings != nil {
+				if err := json.Unmarshal(sc.Settings, &settings); err != nil {
+					t.Fatal(err)
+				}
+			}
+			closeLimit := ms(settings.ShutdownBudgetMS + spec.Limits.CloseMarginMS)
 			captureLogs(t)
 			logs := &lockedLog{}
 			slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
 			url := startCollector(t, collectorScenario{Mode: sc.Mode, DelayMS: sc.DelayMS})
 			server, handle, sent := installEcho(t, mcp.NewServer(&mcp.Implementation{Name: "echo-server"}, nil), url, func(s *httpSink) {
-				s.client.Timeout = ms(spec.Settings.RequestTimeoutMS)
-				s.budget = ms(spec.Settings.ShutdownBudgetMS)
-				s.backoff = ms(spec.Settings.BackoffBaseMS)
+				s.client.Timeout = ms(settings.RequestTimeoutMS)
+				s.budget = ms(settings.ShutdownBudgetMS)
+				s.backoff = ms(settings.BackoffBaseMS)
 			})
 			cs := connect(t, server)
 			closeWithin := func() {
-				started := time.Now()
-				handle.Close(context.Background())
-				if took := time.Since(started); took > closeLimit {
-					t.Errorf("close took %v", took)
+				closed := make(chan struct{})
+				go func() { handle.Close(context.Background()); close(closed) }()
+				select {
+				case <-closed:
+				case <-time.After(closeLimit):
+					t.Fatalf("close did not return within %v", closeLimit)
 				}
 			}
 			warningsBefore := -1
@@ -180,7 +191,11 @@ func TestShutdownScenarios(t *testing.T) {
 					warningsBefore = strings.Count(logs.String(), "level=WARN")
 				}
 			}
-			<-sent.done
+			select { // an event still being sent is counted when its send ends
+			case <-sent.done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the sink kept sending 5s after close")
+			}
 
 			counted := processDrops.totals()
 			for reason, n := range counted {
