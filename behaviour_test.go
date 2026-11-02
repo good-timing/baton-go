@@ -25,25 +25,25 @@ func installWithSink(t *testing.T, cfg Config, register func(*mcp.Server)) (*mcp
 // installOn installs Baton on server as vendor "acme", with a memory sink.
 func installOn(t *testing.T, server *mcp.Server, cfg Config) *memorySink {
 	t.Helper()
-	_, sink := installAs(t, server, cfg, "acme")
-	return sink
+	mem := &memorySink{}
+	installAs(t, server, cfg, "acme", func() sink { return mem })
+	return mem
 }
 
 // installAs installs Baton as Install does for a DSN naming vendorID, whose
-// workspace is vendorID too, but with a memory sink.
-func installAs(t *testing.T, server *mcp.Server, cfg Config, vendorID string) (*Handle, *memorySink) {
+// workspace is vendorID too, but with the sink open returns.
+func installAs(t *testing.T, server *mcp.Server, cfg Config, vendorID string, open func() sink) *Handle {
 	t.Helper()
 	b, err := configure(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	b.vendorID, b.tenantID = vendorID, vendorID
-	mem := &memorySink{}
-	handle, err := b.install(server, func() sink { return mem })
+	handle, err := b.install(server, open)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return handle, mem
+	return handle
 }
 
 // serveHTTP serves server over streamable HTTP, or SSE, and returns the URL.

@@ -3,11 +3,9 @@ package baton
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
-	"os"
-	"os/exec"
+	"maps"
+	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -17,36 +15,20 @@ import (
 // Every scenario of baton-spec's collector/shutdown.json, through Install's
 // path; what each checks is the file's "about".
 
-type shutdownStep struct {
-	Call       int `json:"call"`
-	Flush      *struct{}
-	Close      *struct{}
-	CloseTwice *struct{} `json:"close_twice"`
-	Check      *struct {
-		ToolEvents int `json:"tool_events"`
-	}
-}
-
 type shutdownScenario struct {
-	Name     string          `json:"name"`
-	Mode     string          `json:"mode"`
-	DelayMS  int             `json:"delay_ms"`
-	Settings json.RawMessage `json:"settings"`
-	Steps    []shutdownStep  `json:"steps"`
+	Name     string                       `json:"name"`
+	Mode     string                       `json:"mode"`
+	DelayMS  int                          `json:"delay_ms"`
+	Settings json.RawMessage              `json:"settings"`
+	Steps    []map[string]json.RawMessage `json:"steps"`
 	Expect   struct {
 		Dropped            map[dropReason]int `json:"dropped"`
 		WarningsAfterClose *int               `json:"warnings_after_close"`
 	} `json:"expect"`
 }
 
-type shutdownSettings struct {
-	RequestTimeoutMS int `json:"request_timeout_ms"`
-	ShutdownBudgetMS int `json:"shutdown_budget_ms"`
-	BackoffBaseMS    int `json:"backoff_base_ms"`
-}
-
 type shutdownSpec struct {
-	Settings shutdownSettings `json:"settings"`
+	Settings collectorSettings `json:"settings"`
 	Limits   struct {
 		CallMS        int `json:"call_ms"`
 		CloseMarginMS int `json:"close_margin_ms"`
@@ -58,66 +40,10 @@ var shutdownNotRun = map[string]string{
 	"flush_waits_for_what_is_queued": "Handle has no Flush; Close is the only way to send what is queued",
 }
 
-type echoIn struct {
-	Text string `json:"text"`
-}
-
-func echo(_ context.Context, _ *mcp.CallToolRequest, in echoIn) (*mcp.CallToolResult, echoIn, error) {
-	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: in.Text}}}, in, nil
-}
-
-// lockedLog can be read while the sink's goroutine logs.
-type lockedLog struct {
-	mu  sync.Mutex
-	buf strings.Builder
-}
-
-func (l *lockedLog) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.buf.Write(p)
-}
-
-func (l *lockedLog) String() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.buf.String()
-}
-
-// installEcho adds the echo tool to server and installs Baton on it with
-// default settings, sending to the collector at url.
-func installEcho(t *testing.T, server *mcp.Server, url string, set func(*httpSink)) (*mcp.Server, *Handle, *httpSink) {
-	t.Helper()
-	mcp.AddTool(server, &mcp.Tool{Name: "echo"}, echo)
-	b, err := configure(Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	b.vendorID, b.tenantID = "acme", "acme"
-	var sent *httpSink
-	handle, err := b.install(server, func() sink {
-		sent = newHTTPSink(url, testKey)
-		set(sent)
-		return sent
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return server, handle, sent
-}
-
-func readScenarios(t *testing.T, name string, into any) {
-	t.Helper()
-	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 is missing; the fake collector needs it")
-	}
-	raw, err := os.ReadFile(collectorDir + "/" + name)
-	if err != nil {
-		t.Fatalf("is the baton-spec submodule checked out? %v", err)
-	}
-	if err := json.Unmarshal(raw, into); err != nil {
-		t.Fatal(err)
-	}
+// warnings counts slog records at Warn or above.
+func warnings(logs *testLog) int {
+	s := logs.String()
+	return strings.Count(s, "level=WARN") + strings.Count(s, "level=ERROR")
 }
 
 func TestShutdownScenarios(t *testing.T) {
@@ -136,60 +62,96 @@ func TestShutdownScenarios(t *testing.T) {
 				}
 			}
 			closeLimit := ms(settings.ShutdownBudgetMS + spec.Limits.CloseMarginMS)
-			captureLogs(t)
-			logs := &lockedLog{}
-			slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+			logs := captureLogs(t)
 			url := startCollector(t, collectorScenario{Mode: sc.Mode, DelayMS: sc.DelayMS})
-			server, handle, sent := installEcho(t, mcp.NewServer(&mcp.Implementation{Name: "echo-server"}, nil), url, func(s *httpSink) {
+			server := mcp.NewServer(&mcp.Implementation{Name: "echo-server"}, nil)
+			handle, sent := installEcho(t, server, url, func(s *httpSink) {
 				s.client.Timeout = ms(settings.RequestTimeoutMS)
 				s.budget = ms(settings.ShutdownBudgetMS)
 				s.backoff = ms(settings.BackoffBaseMS)
 			})
 			cs := connect(t, server)
-			closeWithin := func() {
-				closed := make(chan struct{})
-				go func() { handle.Close(context.Background()); close(closed) }()
+
+			// Closes run off the test goroutine, so one that never returns
+			// fails the scenario here instead of hanging it.
+			returned := make(chan struct{}, 2)
+			running := 0
+			startCloses := func(n int) {
+				gate := make(chan struct{})
+				for range n {
+					go func() {
+						<-gate
+						handle.Close(context.Background())
+						returned <- struct{}{}
+					}()
+				}
+				close(gate)
+				running += n
+			}
+			awaitClose := func() {
 				select {
-				case <-closed:
+				case <-returned:
+					running--
 				case <-time.After(closeLimit):
 					t.Fatalf("close did not return within %v", closeLimit)
 				}
 			}
 			warningsBefore := -1
 			for _, step := range sc.Steps {
-				for n := range step.Call {
-					started := time.Now()
-					res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "hi"}})
-					if took := time.Since(started); took > ms(spec.Limits.CallMS) {
-						t.Errorf("call %d took %v", n, took)
-					}
-					if err != nil || res.IsError || len(res.Content) == 0 || res.Content[0].(*mcp.TextContent).Text != "hi" {
-						t.Errorf("call %d: %v %+v", n, err, res)
-					}
+				if len(step) != 1 {
+					t.Fatalf("a step names one action: %v", step)
 				}
-				switch {
-				case step.Close != nil:
-					closeWithin()
-				case step.CloseTwice != nil:
-					var first sync.WaitGroup
-					first.Go(closeWithin)
-					time.Sleep(10 * time.Millisecond)
-					closeWithin()
-					defer first.Wait()
-				case step.Check != nil:
-					got := 0
-					for _, e := range receivedBy(t, url, sc.Mode, "").Events {
-						if e.EventType == "tool_call_start" || e.EventType == "tool_call_end" {
-							got++
+				for action, arg := range step {
+					switch action {
+					case "call":
+						var calls int
+						if err := json.Unmarshal(arg, &calls); err != nil {
+							t.Fatal(err)
 						}
+						for n := range calls {
+							started := time.Now()
+							res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "hi"}})
+							if took := time.Since(started); took > ms(spec.Limits.CallMS) {
+								t.Errorf("call %d took %v", n, took)
+							}
+							if err != nil || res.IsError || len(res.Content) == 0 || res.Content[0].(*mcp.TextContent).Text != "hi" {
+								t.Errorf("call %d: %v %+v", n, err, res)
+							}
+						}
+					case "close":
+						startCloses(1)
+						awaitClose()
+					case "close_twice":
+						// The next step runs once either returns: a close that
+						// returns early fails the check whichever started first.
+						startCloses(2)
+						awaitClose()
+					case "check":
+						var want struct {
+							ToolEvents int `json:"tool_events"`
+						}
+						if err := json.Unmarshal(arg, &want); err != nil {
+							t.Fatal(err)
+						}
+						got := 0
+						for _, e := range receivedBy(t, url, sc.Mode, "").Events {
+							if e.EventType == "tool_call_start" || e.EventType == "tool_call_end" {
+								got++
+							}
+						}
+						if got != want.ToolEvents {
+							t.Errorf("the collector has %d tool events, want %d", got, want.ToolEvents)
+						}
+					default:
+						t.Fatalf("unknown step %q", action)
 					}
-					if got != step.Check.ToolEvents {
-						t.Errorf("the collector has %d tool events, want %d", got, step.Check.ToolEvents)
+					if (action == "close" || action == "close_twice") && warningsBefore < 0 {
+						warningsBefore = warnings(logs)
 					}
 				}
-				if (step.Close != nil || step.CloseTwice != nil) && warningsBefore < 0 {
-					warningsBefore = strings.Count(logs.String(), "level=WARN")
-				}
+			}
+			for running > 0 {
+				awaitClose()
 			}
 			select { // an event still being sent is counted when its send ends
 			case <-sent.done:
@@ -198,22 +160,18 @@ func TestShutdownScenarios(t *testing.T) {
 			}
 
 			counted := processDrops.totals()
-			for reason, n := range counted {
-				if want, named := sc.Expect.Dropped[reason]; !named || n < want {
+			for _, reason := range slices.Concat(slices.Collect(maps.Keys(counted)), slices.Collect(maps.Keys(sc.Expect.Dropped))) {
+				want, named := sc.Expect.Dropped[reason]
+				if n := counted[reason]; n < want || (!named && n > 0) {
 					t.Errorf("counted %v, want at least %v and nothing else", counted, sc.Expect.Dropped)
 					break
-				}
-			}
-			for reason, want := range sc.Expect.Dropped {
-				if counted[reason] < want {
-					t.Errorf("counted %v, want at least %v", counted, sc.Expect.Dropped)
 				}
 			}
 			if strings.Contains(logs.String(), "level=ERROR") {
 				t.Errorf("logs: %s", logs)
 			}
 			if want := sc.Expect.WarningsAfterClose; want != nil {
-				if got := strings.Count(logs.String(), "level=WARN") - warningsBefore; got != *want {
+				if got := warnings(logs) - warningsBefore; got != *want {
 					t.Errorf("%d warnings after close, want %d: %s", got, *want, logs)
 				}
 			}

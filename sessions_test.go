@@ -2,7 +2,9 @@ package baton
 
 import (
 	"context"
+	"encoding/json"
 	"maps"
+	"strconv"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -34,7 +36,8 @@ func TestSessionScenarios(t *testing.T) {
 			if sc.Transport == "stateless_http" {
 				opts = &mcp.ServerOptions{GetSessionID: func() string { return "" }}
 			}
-			server, handle, _ := installEcho(t, mcp.NewServer(&mcp.Implementation{Name: "echo-server"}, opts), url, func(*httpSink) {})
+			server := mcp.NewServer(&mcp.Implementation{Name: "echo-server"}, opts)
+			handle, _ := installEcho(t, server, url, nil)
 			var clients []*mcp.ClientSession
 			for range sc.Clients {
 				switch sc.Transport {
@@ -45,9 +48,12 @@ func TestSessionScenarios(t *testing.T) {
 					clients = append(clients, connectOver(t, &mcp.StreamableClientTransport{Endpoint: endpoint}))
 				}
 			}
+			// Each call's text is its place in the order the calls were made.
+			made := 0
 			for _, cs := range clients {
 				for range sc.Calls {
-					call(t, cs, "echo", map[string]any{"text": "hi"})
+					call(t, cs, "echo", map[string]any{"text": strconv.Itoa(made)})
+					made++
 				}
 			}
 			handle.Close(context.Background())
@@ -77,12 +83,32 @@ func TestSessionScenarios(t *testing.T) {
 			}
 			switch sc.Expect.Sessions {
 			case "one":
-				for i, e := range events {
-					if e.SessionID != events[0].SessionID {
-						t.Errorf("event %d is in %s, not %s", i, e.SessionID, events[0].SessionID)
+				place := map[string]int{}
+				for _, e := range events {
+					if e.EventType == "tool_call_start" {
+						var p struct{ Params echoIn }
+						if err := json.Unmarshal(e.Payload, &p); err != nil {
+							t.Fatal(err)
+						}
+						place[e.CallID], _ = strconv.Atoi(p.Params.Text)
 					}
-					if i > 0 && e.SequenceNumber <= events[i-1].SequenceNumber {
-						t.Errorf("event %d has sequence_number %d after %d", i, e.SequenceNumber, events[i-1].SequenceNumber)
+				}
+				// Each call's start, then its end, in the order the calls were made.
+				ordered := make([]int64, len(events))
+				for _, e := range events {
+					if e.SessionID != events[0].SessionID {
+						t.Errorf("%s is in %s, not %s", e.EventType, e.SessionID, events[0].SessionID)
+					}
+					i := 2 * place[e.CallID]
+					if e.EventType == "tool_call_end" {
+						i++
+					}
+					ordered[i] = e.SequenceNumber
+				}
+				for i := 1; i < len(ordered); i++ {
+					if ordered[i] <= ordered[i-1] {
+						t.Errorf("sequence numbers in call order %v, want each above the last", ordered)
+						break
 					}
 				}
 			case "per_client":
@@ -102,11 +128,4 @@ func TestSessionScenarios(t *testing.T) {
 			}
 		})
 	}
-}
-
-func deref(s *string) string {
-	if s == nil {
-		return "<absent>"
-	}
-	return *s
 }

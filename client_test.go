@@ -371,7 +371,7 @@ func scrubberPanicsOnAFailure(t *testing.T, scrub func(any) any, lost int) {
 	mcp.AddTool(server, &mcp.Tool{Name: "soft_fail"}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
 		return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: "simulated returned failure"}}}, nil, nil
 	})
-	_, sink := installAs(t, server, Config{Scrubber: scrub}, "acme")
+	sink := installOn(t, server, Config{Scrubber: scrub})
 	cs := connect(t, server)
 	call(t, cs, "boom", nil)
 	call(t, cs, "soft_fail", nil)

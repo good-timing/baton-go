@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -97,15 +98,45 @@ func TestParseDSNRefuses(t *testing.T) {
 	}
 }
 
-func captureLogs(t *testing.T) *bytes.Buffer {
+// testLog can be read while a sink's goroutine logs.
+type testLog struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *testLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *testLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
+func (l *testLog) Len() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Len()
+}
+
+func (l *testLog) Reset() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.buf.Reset()
+}
+
+func captureLogs(t *testing.T) *testLog {
 	t.Helper()
 	// Drops left by an earlier test would show up in this one's logs.
 	freshDrops(t)
-	var buf bytes.Buffer
+	logs := &testLog{}
 	old := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(old) })
-	return &buf
+	return logs
 }
 
 func TestASecretKeyWarnsWithoutRepeatingIt(t *testing.T) {

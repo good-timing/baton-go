@@ -35,7 +35,8 @@ func TestIntentScenarios(t *testing.T) {
 		t.Run(sc.Name, func(t *testing.T) {
 			captureLogs(t)
 			url := startCollector(t, collectorScenario{Mode: "ok"})
-			server, handle, _ := installEcho(t, mcp.NewServer(&mcp.Implementation{Name: "echo-server"}, nil), url, func(*httpSink) {})
+			server := mcp.NewServer(&mcp.Implementation{Name: "echo-server"}, nil)
+			handle, _ := installEcho(t, server, url, nil)
 			cs := connect(t, server)
 
 			tools, err := cs.ListTools(context.Background(), nil)

@@ -31,12 +31,8 @@ type collectorScenario struct {
 }
 
 type collectorSpec struct {
-	Settings struct {
-		RequestTimeoutMS int `json:"request_timeout_ms"`
-		ShutdownBudgetMS int `json:"shutdown_budget_ms"`
-		BackoffBaseMS    int `json:"backoff_base_ms"`
-	} `json:"settings"`
-	Limits struct {
+	Settings collectorSettings `json:"settings"`
+	Limits   struct {
 		WriteMS       int `json:"write_ms"`
 		CloseMarginMS int `json:"close_margin_ms"`
 		ReportMS      int `json:"report_ms"`
@@ -105,17 +101,8 @@ func receivedBy(t *testing.T, url, mode, query string) received {
 }
 
 func TestTheSinkKeepsItsPromisesAgainstABrokenCollector(t *testing.T) {
-	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 is missing; the fake collector needs it")
-	}
-	raw, err := os.ReadFile(collectorDir + "/scenarios.json")
-	if err != nil {
-		t.Fatalf("is the baton-spec submodule checked out? %v", err)
-	}
 	var spec collectorSpec
-	if err := json.Unmarshal(raw, &spec); err != nil {
-		t.Fatal(err)
-	}
+	readScenarios(t, "scenarios.json", &spec)
 	ms := func(n int) time.Duration { return time.Duration(n) * time.Millisecond }
 	for _, sc := range spec.Scenarios {
 		t.Run(sc.Name, func(t *testing.T) {
