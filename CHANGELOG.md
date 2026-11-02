@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.1
 
 - **The HTTP sink sends a `client_report` event (SPEC §11.4.7) with this
   process's lost-event counts by reason.** It is sent only after a delivery,
