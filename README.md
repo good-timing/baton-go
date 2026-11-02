@@ -59,7 +59,7 @@ Copy the DSN from **/account**. It packs four values: the collector to send to, 
 
 **If you distribute your server, put the DSN in your source.** A stdio server runs on your user's machine, spawned by their MCP client, which passes it a fixed allowlist of environment variables (six names on macOS and Linux) plus whatever that user wrote in their own client config. Nothing from your `.env` is in either list. For a hosted server, set `BATON_DSN` and pass `baton.Config{}`. An explicit `DSN` wins over `BATON_DSN`.
 
-**With no DSN, Baton installs nothing.** `Install` logs one warning and returns a handle whose `Close` does nothing. Your server starts as usual. A config value that is not valid, such as `ResultCapture: "none"`, is still an error. (The TypeScript SDK prints events to stderr here, and the Python SDK raises an error.)
+**With no DSN, Baton installs nothing.** `Install` logs one warning and returns a handle whose `Close` does nothing. Your server starts as usual. A config value that is not valid, such as `ResultCapture: "none"`, is still an error.
 
 **Call `Close` when your server stops.** Events are sent in the background, so a slow or broken collector never slows a tool call. `Close(ctx)` sends what is still buffered and returns when it is done. It stops trying at `ctx`'s deadline, or after 3 seconds if `ctx` has none. It never returns an error. Events recorded after `Close` are dropped.
 
