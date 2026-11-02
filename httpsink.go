@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-// The numbers are baton-sdk's HttpSink defaults (SPEC §2.5, §11.2 rules 3, 4, 7).
+// SPEC §2.5 and §11.2 rules 3, 4 and 7 set these.
 const (
 	bufferCap        = 1000
 	batchCap         = 100
@@ -26,6 +26,8 @@ const (
 	maxRetries       = 3
 	backoffBase      = 100 * time.Millisecond
 	backoffMax       = 5 * time.Second
+	retryAfterMin    = time.Second
+	retryAfterMax    = time.Minute
 	breakerThreshold = 5
 	breakerReset     = 30 * time.Second
 	closeBudget      = 3 * time.Second
@@ -34,8 +36,11 @@ const (
 	reportEvery      = time.Minute
 )
 
-// batchFrame is the bytes of `{"events":[` and `]}` around a batch's events.
-const batchFrame = len(`{"events":[]}`)
+const (
+	batchOpen  = `{"events":[`
+	batchClose = `]}`
+	batchFrame = len(batchOpen) + len(batchClose)
+)
 
 var reportSequence microClock
 
@@ -43,10 +48,11 @@ var reportSequence microClock
 type queued struct {
 	Event
 	written time.Time
-	// Set by the sending goroutine only, so encoding never runs on the
-	// vendor's call.
+	// Set by the sending goroutine, so encoding never runs on the vendor's
+	// call. cost is the bytes the event adds to a batch body, with its comma.
 	body      []byte
 	encodeErr error
+	cost      int
 	isReport  bool
 	reportSum int
 }
@@ -62,6 +68,9 @@ type httpSink struct {
 	queue    []*queued
 	inFlight []*queued
 	closed   bool
+	// The queue's entries from absolute position head up to sized have their
+	// cost known, and sizedBytes is its sum, so a wake sizes only new events.
+	head, sized, sizedBytes int
 
 	overflowWarned sync.Once
 	lateWarned     sync.Once
@@ -81,12 +90,12 @@ type httpSink struct {
 	single      bool // the collector has no batch endpoint
 	failures    int
 	openedAt    time.Time
-	notBefore   time.Time
+	retryAt     time.Time // after a failure; a flush or close need not wait
+	rateLimited time.Time // a 429's Retry-After; nothing is sent before it
 	lastProblem string
 
 	backoff    time.Duration
 	reset      time.Duration
-	retryAfter time.Duration
 	budget     time.Duration
 	flushEvery time.Duration
 
@@ -119,7 +128,6 @@ func newHTTPSink(origin, key string) *httpSink {
 		cancelReports: cancelReports,
 		backoff:       backoffBase,
 		reset:         breakerReset,
-		retryAfter:    backoffMax,
 		budget:        closeBudget,
 		flushEvery:    flushInterval,
 
@@ -168,15 +176,26 @@ func (s *httpSink) push(e Event) bool {
 func (s *httpSink) putBack(batch []*queued) int {
 	over := max(0, len(s.queue)+len(batch)-bufferCap)
 	processDrops.add(dropBufferFull, over)
-	s.queue = slices.Insert(s.queue, 0, batch[over:]...)
+	kept := batch[over:]
+	s.queue = slices.Insert(s.queue, 0, kept...)
+	s.head -= len(kept)
+	for _, q := range kept {
+		s.sizedBytes += q.cost
+	}
 	return over
 }
 
 // popFront clears the slot so the popped event's payload can be collected.
+// The caller holds s.mu.
 func (s *httpSink) popFront() *queued {
 	q := s.queue[0]
 	s.queue[0] = nil
 	s.queue = s.queue[1:]
+	if s.head < s.sized {
+		s.sizedBytes -= q.cost
+	}
+	s.head++
+	s.sized = max(s.sized, s.head)
 	return q
 }
 
@@ -189,20 +208,22 @@ func (s *httpSink) warnOverflow() {
 
 func (s *httpSink) run() {
 	defer close(s.done)
-	var due <-chan time.Time
+	due := time.NewTimer(time.Hour)
+	due.Stop()
 	for {
 		var flushed chan struct{}
 		select {
 		case <-s.wake:
-		case <-due:
+		case <-due.C:
 		case flushed = <-s.flushes:
 		case <-s.stop:
 			s.drain(true)
 			return
 		}
-		due = nil
 		if wait := s.drain(flushed != nil); wait > 0 {
-			due = time.After(wait)
+			due.Reset(wait)
+		} else {
+			due.Stop()
 		}
 		if flushed != nil {
 			close(flushed)
@@ -215,9 +236,12 @@ func (s *httpSink) run() {
 func (s *httpSink) drain(force bool) time.Duration {
 	for {
 		if !s.breakerAllows() {
-			return s.retryAfter
+			return time.Until(s.openedAt.Add(s.reset))
 		}
-		if wait := time.Until(s.notBefore); wait > 0 {
+		if wait := time.Until(s.rateLimited); wait > 0 {
+			return wait
+		}
+		if wait := time.Until(s.retryAt); wait > 0 && !force {
 			return wait
 		}
 		batch, wait := s.nextBatch(force)
@@ -243,7 +267,11 @@ func (s *httpSink) drain(force bool) time.Duration {
 		if !failed {
 			s.failures = 0
 			s.openedAt = time.Time{}
+			s.retryAt = time.Time{}
 			continue
+		}
+		if time.Now().Before(s.rateLimited) {
+			return time.Until(s.rateLimited)
 		}
 		s.failures++
 		if s.failures >= breakerThreshold {
@@ -251,82 +279,85 @@ func (s *httpSink) drain(force bool) time.Duration {
 			slog.Warn("baton: the console is failing; events are kept and sending pauses",
 				"pause", s.reset, "last_problem", s.lastProblem)
 		}
-		return max(s.retryAfter, time.Until(s.notBefore))
+		// The floor keeps a zero interval from retrying in a tight loop.
+		s.retryAt = time.Now().Add(max(s.flushEvery, s.backoff))
+		return time.Until(s.retryAt)
 	}
+}
+
+// sizeNew encodes the queued events not sized yet, among the first batchCap,
+// outside s.mu, and adds their cost to sizedBytes.
+func (s *httpSink) sizeNew() {
+	s.mu.Lock()
+	from := s.sized
+	var todo []*queued
+	if lo, hi := from-s.head, min(len(s.queue), batchCap); lo < hi {
+		todo = slices.Clone(s.queue[lo:hi])
+	}
+	s.mu.Unlock()
+	if len(todo) == 0 {
+		return
+	}
+	for _, q := range todo {
+		s.encode(q)
+	}
+	s.mu.Lock()
+	// Write may have dropped some meanwhile; those were never in sizedBytes.
+	for i, q := range todo {
+		if from+i >= s.head {
+			s.sizedBytes += q.cost
+		}
+	}
+	s.sized = max(s.sized, from+len(todo))
+	s.mu.Unlock()
 }
 
 // nextBatch takes the next batch off the queue when one is due, and otherwise
 // returns how long until the oldest waiting entry makes one due.
 func (s *httpSink) nextBatch(force bool) ([]*queued, time.Duration) {
-	limit := batchCap
-	if s.single {
-		limit = 1
-	}
+	s.sizeNew()
 	s.mu.Lock()
 	// Once close has given up, what is queued is close's to count.
-	if s.ctx.Err() != nil {
+	if s.ctx.Err() != nil || len(s.queue) == 0 && s.report == nil {
 		s.mu.Unlock()
 		return nil, 0
 	}
-	front := slices.Clone(s.queue[:min(len(s.queue), limit)])
-	more := len(s.queue) > limit
-	report := s.report
-	s.mu.Unlock()
-	if len(front) == 0 && report == nil {
-		return nil, 0
+	oldest := s.report
+	if len(s.queue) > 0 {
+		oldest = s.queue[0]
 	}
-
-	size, encoded := batchFrame, 0
-	fits := func(q *queued) bool {
-		return q.body == nil || encoded == 0 || size+1+len(q.body) <= batchBytes
-	}
-	add := func(q *queued) {
-		if q.body != nil {
-			size += len(q.body) + min(encoded, 1)
-			encoded++
-		}
-	}
-	cut := 0
-	for _, q := range front {
-		s.encode(q)
-		if !fits(q) {
-			break
-		}
-		add(q)
-		cut++
-	}
-	withReport := false
-	if report != nil && cut == len(front) && !more && cut < limit {
-		s.encode(report)
-		withReport = report.body != nil && fits(report)
-	}
-	oldest := report
-	if len(front) > 0 {
-		oldest = front[0]
-	}
-	full := cut < len(front) || len(front) == limit
+	full := s.sized-s.head >= batchCap || batchFrame-1+s.sizedBytes > batchBytes
 	if wait := time.Until(oldest.written.Add(s.flushEvery)); !force && !full && wait > 0 {
+		s.mu.Unlock()
 		return nil, wait
 	}
 
-	s.mu.Lock()
-	var batch, unencodable []*queued
-	// Write may have dropped some of front meanwhile, always from the front
-	// of the queue, so what is left of it is still the queue's front.
-	for i := 0; i < cut && len(s.queue) > 0; i++ {
-		if front[i] != s.queue[0] {
-			continue
-		}
-		q := s.popFront()
-		if q.body == nil {
+	var batch, unencodable, oversize []*queued
+	size := batchFrame - 1
+take:
+	for len(s.queue) > 0 && len(batch) < batchCap {
+		q := s.queue[0]
+		switch {
+		case q.body == nil && q.encodeErr == nil:
+			break take // past the sized ones; the next batch takes it
+		case q.body == nil:
 			unencodable = append(unencodable, q)
-		} else {
+		case batchFrame-1+q.cost > batchBytes:
+			oversize = append(oversize, q)
+		case size+q.cost > batchBytes:
+			break take
+		default:
 			batch = append(batch, q)
+			size += q.cost
 		}
+		s.popFront()
 	}
-	if report != nil && (withReport || report.encodeErr != nil) {
-		s.report = nil
-		if withReport {
+	if report := s.report; report != nil && len(s.queue) == 0 && len(batch) < batchCap {
+		s.encode(report)
+		if report.body == nil {
+			s.report = nil
+		} else if size+report.cost <= batchBytes {
+			s.report = nil
 			batch = append(batch, report)
 		}
 	}
@@ -337,8 +368,12 @@ func (s *httpSink) nextBatch(force bool) ([]*queued, time.Duration) {
 		slog.Warn("baton: an event could not be encoded and has been dropped; the events after it are still sent",
 			"event_type", q.EventType, "error_type", fmt.Sprintf("%T", q.encodeErr))
 	}
+	for _, q := range oversize {
+		processDrops.add(dropRefused, 1)
+		slog.Warn("baton: an event is over the 1 MiB batch cap, which a collector refuses, so it has been dropped unsent",
+			"event_type", q.EventType, "bytes", len(q.body))
+	}
 	if batch == nil {
-		// Everything taken was unencodable or already dropped: look again.
 		return s.nextBatch(force)
 	}
 	return batch, 0
@@ -347,6 +382,9 @@ func (s *httpSink) nextBatch(force bool) ([]*queued, time.Duration) {
 func (s *httpSink) encode(q *queued) {
 	if q.body == nil && q.encodeErr == nil {
 		q.body, q.encodeErr = encodeEvent(q.Event)
+		if q.body != nil {
+			q.cost = 1 + len(q.body)
+		}
 	}
 }
 
@@ -390,55 +428,60 @@ func (s *httpSink) deliver(batch []*queued) (kept []*queued, failed bool) {
 	return nil, false
 }
 
-type batchAnswer struct {
-	Results []struct {
-		Status string `json:"status"`
-		Error  struct {
-			Code string `json:"code"`
-		} `json:"error"`
-	} `json:"results"`
+type eventResult struct {
+	EventID string `json:"event_id"`
+	Status  string `json:"status"`
+	Error   struct {
+		Code string `json:"code"`
+	} `json:"error"`
 }
 
-// settle reads a 2xx answer's per-event results, in the order sent. An event
-// with no readable result counts as delivered: the 2xx says the collector
-// took the batch, and resending it could only make duplicates.
+// settle reads a 2xx answer's results by event_id. An event with no readable
+// result counts as delivered (SPEC §2.5).
 func (s *httpSink) settle(batch []*queued, answer []byte) {
-	var parsed batchAnswer
-	if !s.single {
-		_ = json.Unmarshal(answer, &parsed)
+	results := map[string]eventResult{}
+	var parsed struct{ Results []json.RawMessage }
+	if !s.single && json.Unmarshal(answer, &parsed) == nil {
+		for _, raw := range parsed.Results {
+			var r eventResult
+			if json.Unmarshal(raw, &r) == nil && r.EventID != "" {
+				results[r.EventID] = r
+			}
+		}
 	}
 	var delivered *queued
 	refused, code := 0, ""
-	for i, q := range batch {
-		status := "accepted"
-		if i < len(parsed.Results) {
-			status = parsed.Results[i].Status
-		}
+	for _, q := range batch {
+		r := results[q.EventID]
 		switch {
 		case q.isReport:
 			s.mu.Lock()
-			if status == "refused" {
+			if r.Status == "refused" {
 				s.reportsRefused = true
 			} else {
 				s.reportedSum = max(s.reportedSum, q.reportSum)
 			}
 			s.mu.Unlock()
-		case status == "refused":
+		case r.Status == "refused":
 			refused++
-			code = cmp.Or(code, parsed.Results[i].Error.Code)
+			code = cmp.Or(code, r.Error.Code)
 		case delivered == nil:
 			delivered = q
 		}
 	}
 	if refused > 0 {
-		processDrops.add(dropRefused, refused)
-		slog.Warn("baton: the collector REFUSED events in a batch and they have been dropped; nothing retries a refusal",
-			"refused", refused, "code", code)
+		warnRefused(refused, "code", code)
 	}
 	if delivered != nil {
 		processDrops.logRecovery()
 		s.reportDue(delivered.Event)
 	}
+}
+
+func warnRefused(n int, args ...any) {
+	processDrops.add(dropRefused, n)
+	slog.Warn("baton: the collector REFUSED events; they have been dropped and are not sent again",
+		append([]any{"events", n}, args...)...)
 }
 
 // refuse drops a batch the collector refused as a whole.
@@ -450,13 +493,10 @@ func (s *httpSink) refuse(batch []*queued, status int, answer []byte) {
 		s.reportsRefused = true
 		s.mu.Unlock()
 	}
-	if len(events) == 0 {
-		return
+	if len(events) > 0 {
+		warnRefused(len(events), "status", status,
+			"body", strings.ToValidUTF8(string(answer[:min(len(answer), refusalBodyCap)]), "?"))
 	}
-	processDrops.add(dropRefused, len(events))
-	slog.Warn("baton: the collector REFUSED events and they have been dropped; nothing retries a 4xx",
-		"status", status, "events", len(events),
-		"body", strings.ToValidUTF8(string(answer[:min(len(answer), refusalBodyCap)]), "?"))
 }
 
 // reportDue queues a report of this process's loss totals for the next batch.
@@ -520,21 +560,26 @@ func encodeEvent(e Event) (body []byte, err error) {
 // the answer, or ok false when every try failed.
 func (s *httpSink) post(batch []*queued) (status int, answer []byte, ok bool) {
 	ctx := s.ctx
-	if len(eventsOf(batch)) == 0 {
+	if len(batch) == 1 && batch[0].isReport {
 		ctx = s.reportCtx
 	}
 	url, body := s.origin+"/v0/events", batch[0].body
 	if !s.single {
 		url = s.origin + "/v0/events/batch"
+		size := batchFrame - 1
+		for _, q := range batch {
+			size += q.cost
+		}
 		var b bytes.Buffer
-		b.WriteString(`{"events":[`)
+		b.Grow(size)
+		b.WriteString(batchOpen)
 		for i, q := range batch {
 			if i > 0 {
 				b.WriteByte(',')
 			}
 			b.Write(q.body)
 		}
-		b.WriteString(`]}`)
+		b.WriteString(batchClose)
 		body = b.Bytes()
 	}
 	for attempt := 0; ; attempt++ {
@@ -548,7 +593,7 @@ func (s *httpSink) post(batch []*queued) (status int, answer []byte, ok bool) {
 			s.lastProblem = fmt.Sprintf("%d %s", status, http.StatusText(status))
 		}
 		if wait > 0 {
-			s.notBefore = time.Now().Add(wait)
+			s.rateLimited = time.Now().Add(wait)
 			return 0, nil, false
 		}
 		if attempt == maxRetries {
@@ -563,7 +608,7 @@ func (s *httpSink) post(batch []*queued) (status int, answer []byte, ok bool) {
 }
 
 // do posts body and returns the status, the answer's body, and on a 429 the
-// wait its Retry-After asks for.
+// wait its Retry-After asks for. A 2xx whose body cannot be read is an error.
 func (s *httpSink) do(ctx context.Context, url string, body []byte) (int, []byte, time.Duration, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -575,18 +620,33 @@ func (s *httpSink) do(ctx context.Context, url string, body []byte) (int, []byte
 	if err != nil {
 		return 0, nil, 0, err
 	}
-	answer, _ := io.ReadAll(io.LimitReader(resp.Body, answerCap))
+	answer, err := io.ReadAll(io.LimitReader(resp.Body, answerCap))
 	// Reading to the end lets the connection be reused.
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	resp.Body.Close()
+	if err != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return 0, nil, 0, err
+	}
 	var wait time.Duration
 	if resp.StatusCode == http.StatusTooManyRequests {
-		if secs, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After"))); err == nil && secs > 0 {
-			// A collector's mistake must not stop delivery for hours.
-			wait = min(time.Duration(secs)*time.Second, breakerReset)
-		}
+		wait = retryAfter(resp.Header.Get("Retry-After"))
 	}
 	return resp.StatusCode, answer, wait, nil
+}
+
+// retryAfter reads a Retry-After as whole seconds (RFC 9110 delay-seconds),
+// clamped to SPEC §2.5's range, or 0 for any other value, which makes the
+// 429 a 5xx.
+func retryAfter(header string) time.Duration {
+	header = strings.TrimSpace(header)
+	if header == "" || strings.Trim(header, "0123456789") != "" {
+		return 0
+	}
+	secs, err := strconv.ParseUint(header, 10, 64)
+	if err != nil || secs > uint64(retryAfterMax/time.Second) {
+		return retryAfterMax // only digits, so err is an overflow
+	}
+	return max(time.Duration(secs)*time.Second, retryAfterMin)
 }
 
 // flush sends what is queued at once, and returns when that is done, at ctx's
@@ -620,7 +680,7 @@ func (s *httpSink) withBudget(ctx context.Context) (context.Context, context.Can
 
 // close sends what is queued until ctx's deadline, or for s.budget when ctx
 // has none. A second close waits for the first. When the console is failing,
-// close does not try again.
+// or during a 429's wait, close does not try again.
 func (s *httpSink) close(ctx context.Context) {
 	unsent := 0
 	// The warning is logged outside Do: a log handler that calls Close would

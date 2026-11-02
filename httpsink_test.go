@@ -281,8 +281,7 @@ func TestARefusedEventIsDroppedAndTheRestStillGo(t *testing.T) {
 	console := newFakeConsole(t, nil)
 	console.refuse = func(e map[string]any) bool { return e["sequence_number"] == 0.0 }
 	logs := captureLogs(t)
-	s := fastSink(console)
-	s.flushEvery = time.Hour
+	s := batchingSink(console)
 	for n := range 3 {
 		s.write(testEvent(n))
 	}
@@ -300,8 +299,7 @@ func TestARefusedEventIsDroppedAndTheRestStillGo(t *testing.T) {
 
 func TestABatchRefusedAsAWholeIsCountedEventByEvent(t *testing.T) {
 	logs := captureLogs(t)
-	s := fastSink(newFakeConsole(t, func(int) int { return http.StatusForbidden }))
-	s.flushEvery = time.Hour
+	s := batchingSink(newFakeConsole(t, func(int) int { return http.StatusForbidden }))
 	for n := range 3 {
 		s.write(testEvent(n))
 	}
@@ -359,10 +357,8 @@ func TestAfterFiveFailuresNothingIsSentAndCloseDoesNotTry(t *testing.T) {
 	console := newFakeConsole(t, func(int) int { return http.StatusInternalServerError })
 	s := fastSink(console)
 	perFailure := maxRetries + 1
-	for n := range breakerThreshold {
-		s.write(testEvent(n))
-		waitFor(t, "the retries", func() bool { return console.count() == (n+1)*perFailure })
-	}
+	s.write(testEvent(0))
+	waitFor(t, "the retries", func() bool { return console.count() >= breakerThreshold*perFailure })
 	s.write(testEvent(99))
 	time.Sleep(50 * time.Millisecond)
 	s.close(context.Background())
@@ -386,17 +382,16 @@ func TestAfterTheBreakerResetsTheKeptEventsAreSent(t *testing.T) {
 	s.reset = 50 * time.Millisecond
 	for n := range breakerThreshold {
 		s.write(testEvent(n))
-		waitFor(t, "the retries", func() bool { return console.count() == (n+1)*(maxRetries+1) })
 	}
+	waitFor(t, "the retries", func() bool { return console.count() >= breakerThreshold*(maxRetries+1) })
 	mu.Lock()
 	failing = false
 	mu.Unlock()
 	time.Sleep(60 * time.Millisecond)
 	s.write(testEvent(99))
 	s.close(context.Background())
-	// The kept events and the new one go in one batch.
-	if got := console.count() - breakerThreshold*(maxRetries+1); got != 1 {
-		t.Errorf("%d requests after the reset, want 1", got)
+	if got := console.count() - breakerThreshold*(maxRetries+1); got < 1 || got > 2 {
+		t.Errorf("%d requests after the reset, want 1 or 2", got)
 	}
 	var last []float64
 	for _, e := range console.events[console.eventCount()-breakerThreshold-1:] {
@@ -532,7 +527,6 @@ func TestAFailedEventIsRetriedWithoutAnotherWrite(t *testing.T) {
 		return http.StatusAccepted
 	})
 	s := fastSink(console)
-	s.retryAfter = 10 * time.Millisecond
 	s.write(testEvent(1))
 	waitFor(t, "the retry", func() bool { return console.count() == maxRetries+2 })
 	s.close(context.Background())
@@ -542,10 +536,8 @@ func TestTheBreakerOpeningIsLogged(t *testing.T) {
 	console := newFakeConsole(t, func(int) int { return http.StatusBadGateway })
 	logs := captureLogs(t)
 	s := fastSink(console)
-	for n := range breakerThreshold {
-		s.write(testEvent(n))
-		waitFor(t, "the retries", func() bool { return console.count() == (n+1)*(maxRetries+1) })
-	}
+	s.write(testEvent(0))
+	waitFor(t, "the retries", func() bool { return console.count() >= breakerThreshold*(maxRetries+1) })
 	s.close(context.Background())
 	if !strings.Contains(logs.String(), "console is failing") || !strings.Contains(logs.String(), "502") {
 		t.Errorf("logs: %s", logs)
@@ -670,6 +662,10 @@ func TestABatchGoesWhenTheNextEventWouldPassTheByteCap(t *testing.T) {
 		s.write(bigEvent(n, 400_000))
 	}
 	waitFor(t, "a batch", func() bool { return console.count() == 1 })
+	time.Sleep(50 * time.Millisecond)
+	if console.count() != 1 {
+		t.Errorf("%d requests: the event left over did not wait for its turn", console.count())
+	}
 	s.close(context.Background())
 	sizes := console.batchSizes()
 	if !slices.Equal(sizes, []int{2, 1}) || console.sizes[0] > batchBytes {
@@ -690,7 +686,7 @@ func TestAnEventTooBigForABatchGoesAlone(t *testing.T) {
 	}
 }
 
-func TestAnEventOverTheByteCapIsRefusedAndTheNextStillGoes(t *testing.T) {
+func TestAnEventOverTheByteCapIsRefusedUnsent(t *testing.T) {
 	logs := captureLogs(t)
 	console := newFakeConsole(t, nil)
 	s := batchingSink(console)
@@ -700,8 +696,29 @@ func TestAnEventOverTheByteCapIsRefusedAndTheNextStillGoes(t *testing.T) {
 	if got := processDrops.totals(); !maps.Equal(got, map[dropReason]int{dropRefused: 1}) {
 		t.Errorf("counts %v, want refused 1", got)
 	}
-	if got := console.sequences(); !slices.Equal(got[len(got)-1:], []float64{1}) || !strings.Contains(logs.String(), "status=413") {
+	if got := console.sequences(); !slices.Equal(got, []float64{1}) || !strings.Contains(logs.String(), "over the 1 MiB") {
 		t.Errorf("sequences %v; logs: %s", got, logs)
+	}
+}
+
+func TestASingleEventThatGets413IsRefused(t *testing.T) {
+	logs := captureLogs(t)
+	console := newFakeConsole(t, func(n int) int {
+		if n == 0 {
+			return http.StatusRequestEntityTooLarge
+		}
+		return http.StatusAccepted
+	})
+	s := batchingSink(console)
+	s.write(testEvent(0))
+	s.flush(context.Background())
+	s.write(testEvent(1))
+	s.close(context.Background())
+	if got := processDrops.totals(); !maps.Equal(got, map[dropReason]int{dropRefused: 1}) || !strings.Contains(logs.String(), "status=413") {
+		t.Errorf("counts %v; logs: %s", got, logs)
+	}
+	if got := console.batchSizes(); !slices.Equal(got, []int{1, 1}) {
+		t.Errorf("batches %v", got)
 	}
 }
 
@@ -866,4 +883,235 @@ func TestCloseKeepsItsBudgetAgainstAHungCollector(t *testing.T) {
 	if got := processDrops.totals(); !maps.Equal(got, map[dropReason]int{dropUnsentAtClose: 5}) || !strings.Contains(logs.String(), "unsent=5") {
 		t.Errorf("counts %v; logs: %s", got, logs)
 	}
+}
+
+func TestRetryAfterIsSecondsBetweenOneAndSixty(t *testing.T) {
+	for header, want := range map[string]time.Duration{
+		"2":                             2 * time.Second,
+		" 3 ":                           3 * time.Second,
+		"0":                             time.Second,
+		"120":                           time.Minute,
+		"99999999999999999999999":       time.Minute,
+		"1.5":                           0,
+		"-1":                            0,
+		"+3":                            0,
+		"":                              0,
+		"soon":                          0,
+		"Wed, 21 Oct 2026 07:28:00 GMT": 0,
+	} {
+		if got := retryAfter(header); got != want {
+			t.Errorf("Retry-After %q: %v, want %v", header, got, want)
+		}
+	}
+}
+
+// failuresAfterClose closes s and returns its breaker's count, which only the
+// sending goroutine writes, once that goroutine has ended.
+func failuresAfterClose(s *httpSink) int {
+	s.close(context.Background())
+	<-s.done
+	return s.failures
+}
+
+func TestA429WithARetryAfterDoesNotCountTowardsTheBreaker(t *testing.T) {
+	captureLogs(t)
+	console := newFakeConsole(t, func(int) int { return http.StatusTooManyRequests })
+	console.retryAfter = "1"
+	s := fastSink(console)
+	s.write(testEvent(0))
+	waitFor(t, "the 429", func() bool { return console.count() == 1 })
+	if n := failuresAfterClose(s); n != 0 || console.count() != 1 {
+		t.Errorf("%d failures, %d requests; want 0 and 1: close does not send during the wait", n, console.count())
+	}
+}
+
+func TestA429WithoutAReadableRetryAfterIsA5xx(t *testing.T) {
+	captureLogs(t)
+	console := newFakeConsole(t, func(int) int { return http.StatusTooManyRequests })
+	console.retryAfter = "soon"
+	s := fastSink(console)
+	s.flushEvery = time.Hour
+	s.write(testEvent(0))
+	s.flush(context.Background())
+	if console.count() != maxRetries+1 {
+		t.Errorf("%d requests, want %d tries", console.count(), maxRetries+1)
+	}
+	if n := failuresAfterClose(s); n == 0 {
+		t.Error("the 429 did not count towards the breaker")
+	}
+}
+
+func TestAWriteAfterAFailureWaitsForTheTimer(t *testing.T) {
+	captureLogs(t)
+	console := newFakeConsole(t, func(n int) int {
+		if n <= maxRetries {
+			return http.StatusServiceUnavailable
+		}
+		return http.StatusAccepted
+	})
+	s := fastSink(console)
+	s.flushEvery = 200 * time.Millisecond
+	s.write(testEvent(0))
+	waitFor(t, "the failure", func() bool { return console.count() == maxRetries+1 })
+	failedAt := time.Now()
+	s.write(testEvent(1))
+	time.Sleep(100 * time.Millisecond)
+	if console.count() != maxRetries+1 {
+		t.Fatalf("%d requests: a write after a failure sent at once", console.count())
+	}
+	waitFor(t, "the timer", func() bool { return console.count() == maxRetries+2 })
+	if took := time.Since(failedAt); took < 150*time.Millisecond {
+		t.Errorf("retried %v after the failure", took)
+	}
+	s.close(context.Background())
+	if got := console.sequences(); !slices.Equal(got[len(got)-2:], []float64{0, 1}) {
+		t.Errorf("sequences %v", got)
+	}
+}
+
+func TestInOneEventModeEventsStillWaitForTheTimer(t *testing.T) {
+	captureLogs(t)
+	console := newFakeConsole(t, nil)
+	console.noBatch = http.StatusNotFound
+	s := fastSink(console)
+	s.flushEvery = 200 * time.Millisecond
+	s.write(testEvent(0))
+	waitFor(t, "the first event", func() bool { return console.count() == 1 })
+	s.write(testEvent(1))
+	s.write(testEvent(2))
+	time.Sleep(100 * time.Millisecond)
+	if console.count() != 1 {
+		t.Fatalf("%d requests before the timer", console.count())
+	}
+	waitFor(t, "the timer", func() bool { return console.count() == 3 })
+	s.close(context.Background())
+}
+
+// answering serves POSTs with handle, for answers fakeConsole cannot give.
+func answering(t *testing.T, handle func(n int, events []map[string]any, w http.ResponseWriter)) (string, *int) {
+	t.Helper()
+	var mu sync.Mutex
+	requests := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct{ Events []map[string]any }
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		n := requests
+		requests++
+		mu.Unlock()
+		handle(n, body.Events, w)
+	}))
+	t.Cleanup(ts.Close)
+	return ts.URL, &requests
+}
+
+func TestA2xxWhoseBodyCannotBeReadIsSentAgain(t *testing.T) {
+	captureLogs(t)
+	url, requests := answering(t, func(n int, _ []map[string]any, w http.ResponseWriter) {
+		if n == 0 {
+			w.Header().Set("Content-Length", "100")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"results":`))
+			w.(http.Flusher).Flush()
+			panic(http.ErrAbortHandler)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	s := newHTTPSink(url, testKey)
+	s.backoff = time.Millisecond
+	s.flushEvery = time.Hour
+	s.write(testEvent(0))
+	s.close(context.Background())
+	<-s.done
+	if *requests != 2 || len(processDrops.totals()) != 0 {
+		t.Errorf("%d requests, counts %v; want 2 and none", *requests, processDrops.totals())
+	}
+}
+
+func TestResultsAreReadByEventID(t *testing.T) {
+	captureLogs(t)
+	url, _ := answering(t, func(_ int, events []map[string]any, w http.ResponseWriter) {
+		// Out of order, with an id never sent and a malformed entry for event
+		// 0, which alone counts as delivered: only event 2 is refused.
+		_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{
+			map[string]any{"event_id": "never-sent", "status": "refused"},
+			map[string]any{"event_id": events[0]["event_id"], "status": 7},
+			map[string]any{"event_id": events[2]["event_id"], "status": "refused", "error": map[string]any{"code": "payload_malformed"}},
+			map[string]any{"event_id": events[1]["event_id"], "status": "accepted"},
+		}})
+	})
+	s := newHTTPSink(url, testKey)
+	s.flushEvery = time.Hour
+	for n := range 3 {
+		s.write(testEvent(n))
+	}
+	s.close(context.Background())
+	if got := processDrops.totals(); !maps.Equal(got, map[dropReason]int{dropRefused: 1}) {
+		t.Errorf("counts %v, want refused 1", got)
+	}
+}
+
+func TestTheByteCapStillCutsAfterAFailedBatchIsPutBack(t *testing.T) {
+	captureLogs(t)
+	var mu sync.Mutex
+	failing := true
+	console := newFakeConsole(t, func(int) int {
+		mu.Lock()
+		defer mu.Unlock()
+		if failing {
+			return http.StatusServiceUnavailable
+		}
+		return http.StatusAccepted
+	})
+	s := batchingSink(console)
+	for n := range 3 {
+		s.write(bigEvent(n, 400_000))
+	}
+	waitFor(t, "the failed batch", func() bool { return console.count() == maxRetries+1 })
+	mu.Lock()
+	failing = false
+	mu.Unlock()
+	s.flush(context.Background())
+	if got := console.batchSizes()[maxRetries+1:]; !slices.Equal(got, []int{2, 1}) {
+		t.Fatalf("batches after the failure %v, want 2 then 1", got)
+	}
+	// The three put back were counted once each in the bytes waiting, so
+	// the next three still make a batch go at once.
+	for n := range 3 {
+		s.write(bigEvent(10+n, 400_000))
+	}
+	waitFor(t, "a batch by bytes", func() bool { return console.count() == maxRetries+4 })
+	s.close(context.Background())
+}
+
+// slowToEncode holds the sending goroutine inside MarshalJSON until released.
+type slowToEncode struct{ started, release chan struct{} }
+
+func (v slowToEncode) MarshalJSON() ([]byte, error) {
+	close(v.started)
+	<-v.release
+	return json.Marshal(strings.Repeat("x", 400_000))
+}
+
+func TestAnEventDroppedWhileItIsEncodedLeavesNoBytesBehind(t *testing.T) {
+	captureLogs(t)
+	console := newFakeConsole(t, nil)
+	s := batchingSink(console)
+	slow := slowToEncode{make(chan struct{}), make(chan struct{})}
+	e := testEvent(-1)
+	e.Payload = slow
+	s.write(e)
+	<-slow.started
+	for n := range bufferCap {
+		s.write(testEvent(n)) // the last pushes the slow one out
+	}
+	close(slow.release)
+	waitFor(t, "the full batches", func() bool { return console.eventCount() == bufferCap })
+	s.write(bigEvent(1000, 400_000))
+	s.write(bigEvent(1001, 400_000))
+	time.Sleep(100 * time.Millisecond)
+	if console.eventCount() != bufferCap {
+		t.Errorf("two events under the byte cap went before their time")
+	}
+	s.close(context.Background())
 }

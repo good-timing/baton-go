@@ -9,7 +9,9 @@
   recorded, and a process that stops without `Close` can lose those last
   5 seconds of events. A collector without the batch endpoint (it answers
   404 or 405) still works: the SDK then sends one event per request to
-  `/v0/events`, and loses nothing in the switch.
+  `/v0/events`, and loses nothing in the switch. A 429 with a
+  `Retry-After` of 1 to 60 seconds pauses sending for that long. An event
+  too big for a 1 MiB batch is never sent, and is counted as refused.
 
 ## 0.1.4
 
