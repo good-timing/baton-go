@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -25,6 +26,7 @@ type collectorScenario struct {
 	Expect  struct {
 		Accepted *int `json:"accepted"`
 		Dropped  *int `json:"dropped"`
+		Reports  *int `json:"reports"`
 	} `json:"expect"`
 }
 
@@ -37,6 +39,7 @@ type collectorSpec struct {
 	Limits struct {
 		WriteMS       int `json:"write_ms"`
 		CloseMarginMS int `json:"close_margin_ms"`
+		ReportMS      int `json:"report_ms"`
 	} `json:"limits"`
 	Scenarios []collectorScenario `json:"scenarios"`
 }
@@ -70,15 +73,16 @@ func startCollector(t *testing.T, sc collectorScenario) string {
 type received struct {
 	Accepted []int
 	Requests int
+	Reports  int
 }
 
-func receivedBy(t *testing.T, url, mode string) received {
+func receivedBy(t *testing.T, url, mode, query string) received {
 	t.Helper()
 	var body received
 	if mode == "down" {
 		return body
 	}
-	resp, err := (&http.Client{Timeout: 2 * time.Second}).Get(url + "/_received")
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Get(url + "/_received" + query)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,6 +122,13 @@ func TestTheSinkKeepsItsPromisesAgainstABrokenCollector(t *testing.T) {
 					t.Errorf("write %d took %v", n, took)
 				}
 			}
+			if want := sc.Expect.Reports; want != nil {
+				accepted := 0
+				if sc.Expect.Accepted != nil {
+					accepted = *sc.Expect.Accepted
+				}
+				receivedBy(t, url, sc.Mode, fmt.Sprintf("?accepted=%d&reports=%d&wait_ms=%d", accepted, *want, spec.Limits.ReportMS))
+			}
 			started := time.Now()
 			s.close(context.Background())
 			if took := time.Since(started); took > ms(spec.Settings.ShutdownBudgetMS+spec.Limits.CloseMarginMS) {
@@ -133,7 +144,7 @@ func TestTheSinkKeepsItsPromisesAgainstABrokenCollector(t *testing.T) {
 			if strings.Contains(logs.String(), "level=ERROR") {
 				t.Errorf("logs: %s", logs)
 			}
-			r := receivedBy(t, url, sc.Mode)
+			r := receivedBy(t, url, sc.Mode, "")
 			got := r.Accepted
 			if sc.Mode != "down" && r.Requests < 1 {
 				t.Error("the collector got no request")
@@ -155,6 +166,9 @@ func TestTheSinkKeepsItsPromisesAgainstABrokenCollector(t *testing.T) {
 			}
 			if want := sc.Expect.Dropped; want != nil && dropped != *want {
 				t.Errorf("counted %v, want %d", processDrops.totals(), *want)
+			}
+			if want := sc.Expect.Reports; want != nil && r.Reports != *want {
+				t.Errorf("%d reports, want %d", r.Reports, *want)
 			}
 		})
 	}
