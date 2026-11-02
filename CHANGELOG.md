@@ -6,7 +6,8 @@
   process's lost-event counts by reason.** It is sent only after a delivery,
   only when the counts changed, at most once a minute, and never at close. A
   healthy run sends none. It goes beside the event queue, so it never delays
-  an event or `Close`, and a lost report is not counted. A collector that
+  an event, and `Close` cancels one still in flight. A lost report is not
+  counted. A collector that
   answers it with 400 or 422 gets no more reports from that sink.
 - **Names with "İ" (U+0130) now match `baton-sdk`.** Go lowercases İ to "i",
   but Python lowercases it to "i" plus a dot mark, which matches no field
@@ -20,16 +21,23 @@
   that checks the schema could refuse the event.
   - With no arguments it is `{}`, as in `baton-sdk`. So are arguments that
     are not an object, such as `[1, 2]`. Before, it was `null` or the array.
+  - A custom `Scrubber` now sees that `{}`: it is called on calls with no
+    arguments, and never sees arguments that are not an object.
   - When the `Scrubber` returns something that cannot be sent as an object,
     such as a string, it is `{}`, and this is logged once.
-- **`params`, `runtime_meta` (the request's `_meta`) and an annotation's
-  `context` keep a `Scrubber` result that encodes as a JSON object, such as
-  a `map[string]string`.** Before, `runtime_meta` and `context` sent it as
-  `null`.
-- **A value whose `MarshalJSON` panics no longer crashes your server.** When
-  a `Scrubber` returned one, for a tool result or inside a map, the panic
-  happened in the background sender and stopped the process. Now only that
-  event is dropped, and it is counted as `encode_failed`.
+- **A custom `Scrubber`'s result is copied as plain JSON data while the call
+  runs.**
+  - `params`, `runtime_meta` (the request's `_meta`) and an annotation's
+    `context` keep a result that is an object of another Go type, such as a
+    `map[string]string`. Before, `runtime_meta` and `context` sent it as
+    `null`.
+  - A result that cannot be encoded, such as one holding a value whose
+    `MarshalJSON` panics, costs what a `Scrubber` panic in that place costs:
+    the value for `params`, `runtime_meta`, `user_goal` and
+    `client_observed`; the event, counted as `encode_failed`, for a result
+    and an annotation. Before, the panic happened in the background sender
+    and stopped your server.
+  - The sender never reads a map your code still holds.
 
 ## 0.1.0
 

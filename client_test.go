@@ -190,13 +190,21 @@ type panicsWhenEncoded struct{}
 
 func (panicsWhenEncoded) MarshalJSON() ([]byte, error) { panic("cannot encode") }
 
-func TestAScrubbedObjectThatPanicsWhenEncodedCostsOnlyThatValue(t *testing.T) {
+func TestAScrubbedValueThatCannotBeEncodedCostsWhatAScrubberPanicCosts(t *testing.T) {
+	bad := map[string]any{"ok": 1, "bad": panicsWhenEncoded{}}
 	scrub := func(v any) any {
-		if m, ok := v.(map[string]any); ok && (m["trace"] != nil || m["name"] == "alice" || m["ticket"] != nil) {
-			return panicsWhenEncoded{}
+		switch v := v.(type) {
+		case map[string]any:
+			if v["trace"] != nil || v["name"] == "alice" || v["ticket"] != nil {
+				return bad
+			}
+		case []any:
+			return []any{map[string]any{"bad": leakyValue{}}}
 		}
 		return v
 	}
+	logs := captureLogs(t)
+	before := encodeFailedDrops()
 	server, sink := installWithSink(t, Config{Scrubber: scrub, ReportMode: "on"}, addLookup)
 	cs := connect(t, server)
 	callWithMeta(t, cs, mcp.Meta{"trace": "t1"})
@@ -205,11 +213,16 @@ func TestAScrubbedObjectThatPanicsWhenEncodedCostsOnlyThatValue(t *testing.T) {
 	})
 	starts := asJSON(t, ofType(sink.all(), "tool_call_start"))
 	if len(starts) != 1 || starts[0]["runtime_meta"] != nil || !reflect.DeepEqual(starts[0]["payload"].(map[string]any)["params"], map[string]any{}) {
-		t.Fatalf("starts %v", starts)
+		t.Errorf("starts %v", starts)
 	}
-	annotations := asJSON(t, ofType(sink.all(), "annotation"))
-	if len(annotations) != 1 || annotations[0]["payload"].(map[string]any)["context"] != nil {
-		t.Fatalf("annotations %v", annotations)
+	if ends, annotations := ofType(sink.all(), "tool_call_end"), ofType(sink.all(), "annotation"); len(ends) != 0 || len(annotations) != 0 {
+		t.Errorf("%d ends, %d annotations, want 0: their build panicked", len(ends), len(annotations))
+	}
+	if n := encodeFailedDrops() - before; n != 2 {
+		t.Errorf("%d drops counted, want 2", n)
+	}
+	if strings.Contains(logs.String(), "private-result-text") {
+		t.Errorf("an encode error's text was logged:\n%s", logs)
 	}
 }
 
@@ -387,7 +400,7 @@ func TestParamsIsAlwaysAnObject(t *testing.T) {
 		"an array":                            {[]any{1, 2}, NoScrub, map[string]any{}, false},
 		"a Scrubber that returns a string":    {map[string]any{"a": 1}, objectsTo("[redacted]"), map[string]any{}, true},
 		"a Scrubber that returns a typed map": {map[string]any{"a": 1}, objectsTo(map[string]string{"a": "[redacted]"}), map[string]any{"a": "[redacted]"}, false},
-		"a Scrubber that returns a nil map":   {map[string]any{"a": 1}, objectsTo(map[string]any(nil)), map[string]any{}, true},
+		"a Scrubber that returns a nil map":   {map[string]any{"a": 1}, objectsTo(map[string]any(nil)), map[string]any{}, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			logs := captureLogs(t)

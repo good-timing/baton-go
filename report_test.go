@@ -29,7 +29,7 @@ func tenantEvent(n int) Event {
 func reportIdle(s *httpSink) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return !s.reporting
+	return s.report == nil
 }
 
 // sendAll writes n events, letting each send and any report it starts end.
@@ -186,9 +186,26 @@ func TestNoReportStartsOnceCloseBegan(t *testing.T) {
 	sendAll(t, s, 1)
 	s.close(context.Background())
 	s.mu.Lock()
-	due := s.reportDue()
+	due := s.reportDue(testEvent(2))
 	s.mu.Unlock()
 	if due != nil || console.reportCount() != 0 {
 		t.Errorf("a report started after close")
+	}
+}
+
+func TestAFinishedReportReleasesItsContext(t *testing.T) {
+	captureLogs(t)
+	s, console := reportSink(t, []int{400}, 0)
+	sendAll(t, s, 1)
+	s.mu.Lock()
+	s.reportedSum = -1
+	due := s.reportDue(tenantEvent(1))
+	s.mu.Unlock()
+	if due == nil {
+		t.Fatal("no report was due")
+	}
+	s.sendReport(due)
+	if console.reportCount() == 0 || due.ctx.Err() == nil || !reportIdle(s) {
+		t.Errorf("%d reports; context %v; idle %v", console.reportCount(), due.ctx.Err(), reportIdle(s))
 	}
 }

@@ -72,6 +72,7 @@ const toolCacheCap = 4096
 
 type installed struct {
 	cfg                 Config
+	customScrubber      bool
 	vendorID            string
 	tenantID            string
 	sink                sink
@@ -164,7 +165,8 @@ func configure(cfg Config) (*installed, error) {
 	cfg.ResultCapture = cmp.Or(cfg.ResultCapture, "full")
 	cfg.IntentParam = cmp.Or(cfg.IntentParam, "required")
 	cfg.ReportMode = cmp.Or(cfg.ReportMode, "off")
-	if cfg.Scrubber == nil {
+	customScrubber := cfg.Scrubber != nil
+	if !customScrubber {
 		cfg.Scrubber = DefaultScrubber
 	}
 	if err := errors.Join(
@@ -176,6 +178,7 @@ func configure(cfg Config) (*installed, error) {
 	}
 	b := &installed{
 		cfg:                 cfg,
+		customScrubber:      customScrubber,
 		userGoalDescription: userGoalDescription(cfg.IntentParam),
 		requiredNames:       []string{},
 		sessions:            newSessions(),

@@ -72,18 +72,18 @@ type httpSink struct {
 	// Loss reports (SPEC §11.4.7), guarded by mu.
 	reportEvery    time.Duration
 	lastReport     time.Time
-	reporting      bool
+	report         *dueReport // the one in flight, or nil
 	reportedSum    int
 	reportsRefused bool
-	stopReport     context.CancelFunc
-	reportDone     chan struct{}
 }
 
 type dueReport struct {
-	totals map[dropReason]int
-	sum    int
-	ctx    context.Context
-	done   chan struct{}
+	totals                           map[dropReason]int
+	sum                              int
+	tenantID, vendorID, consentToken string
+	ctx                              context.Context
+	cancel                           context.CancelFunc
+	done                             chan struct{}
 }
 
 func newHTTPSink(origin, key string) *httpSink {
@@ -210,11 +210,11 @@ func (s *httpSink) drain() bool {
 		dropped := result == transient && !stopped && s.putBack(e)
 		var report *dueReport
 		if result == sent {
-			report = s.reportDue()
+			report = s.reportDue(e)
 		}
 		s.mu.Unlock()
 		if report != nil {
-			go s.sendReport(e, *report)
+			go s.sendReport(report)
 		}
 		if stopped {
 			processDrops.add(dropUnsentAtClose, 1)
@@ -246,8 +246,8 @@ func (s *httpSink) drain() bool {
 // reportDue says whether to send a report of this process's loss totals,
 // beside the drain and outside the queue, so it never delays an event and is
 // never counted as one. The caller holds s.mu.
-func (s *httpSink) reportDue() *dueReport {
-	if s.closed || s.reportsRefused || s.reporting || time.Since(s.lastReport) < s.reportEvery {
+func (s *httpSink) reportDue(delivered Event) *dueReport {
+	if s.closed || s.reportsRefused || s.report != nil || time.Since(s.lastReport) < s.reportEvery {
 		return nil
 	}
 	totals := processDrops.totals()
@@ -260,21 +260,25 @@ func (s *httpSink) reportDue() *dueReport {
 		return nil
 	}
 	s.lastReport = time.Now()
-	s.reporting = true
 	ctx, cancel := context.WithCancel(s.ctx)
-	s.stopReport, s.reportDone = cancel, make(chan struct{})
-	return &dueReport{totals: totals, sum: sum, ctx: ctx, done: s.reportDone}
+	s.report = &dueReport{
+		totals: totals, sum: sum,
+		tenantID: delivered.TenantID, vendorID: delivered.VendorID, consentToken: delivered.ConsentToken,
+		ctx: ctx, cancel: cancel, done: make(chan struct{}),
+	}
+	return s.report
 }
 
-func (s *httpSink) sendReport(delivered Event, due dueReport) {
+func (s *httpSink) sendReport(due *dueReport) {
 	status := 0
 	defer close(due.done)
+	defer due.cancel()
 	defer func() {
 		// A report is optional; nothing in it may take the vendor's process down.
 		_ = recover()
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		s.reporting = false
+		s.report = nil
 		switch {
 		case status == http.StatusBadRequest || status == http.StatusUnprocessableEntity:
 			s.reportsRefused = true
@@ -284,12 +288,12 @@ func (s *httpSink) sendReport(delivered Event, due dueReport) {
 	}()
 	body, err := json.Marshal(Event{
 		EventID:        uuid7(),
-		TenantID:       delivered.TenantID,
-		VendorID:       delivered.VendorID,
+		TenantID:       due.tenantID,
+		VendorID:       due.vendorID,
 		SessionID:      processDrops.instanceID,
 		SequenceNumber: reportSequence.next(),
 		CapturedAt:     time.Now().UTC().Format(time.RFC3339Nano),
-		ConsentToken:   delivered.ConsentToken,
+		ConsentToken:   due.consentToken,
 		SDKVersion:     sdkVersion,
 		AgentRuntime:   "unknown",
 		EventType:      "client_report",
@@ -396,7 +400,7 @@ func (s *httpSink) close(ctx context.Context) {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		s.closed = true
-		stopReport, reportDone := s.stopReport, s.reportDone
+		report := s.report
 		s.mu.Unlock()
 		if ctx == nil {
 			ctx = context.Background()
@@ -406,10 +410,10 @@ func (s *httpSink) close(ctx context.Context) {
 			ctx, cancel = context.WithTimeout(ctx, s.budget)
 			defer cancel()
 		}
-		if stopReport != nil {
-			stopReport()
+		if report != nil {
+			report.cancel()
 			select {
-			case <-reportDone:
+			case <-report.done:
 			case <-ctx.Done():
 			}
 		}

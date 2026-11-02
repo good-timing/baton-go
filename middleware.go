@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"reflect"
@@ -236,7 +237,7 @@ func (b *installed) newCallContext(ctx context.Context, r *mcp.CallToolRequest) 
 	if len(r.Params.Meta) > 0 {
 		meta, _ := jsonValue(map[string]any(r.Params.Meta)).(map[string]any)
 		// Rounded before the vendor's scrubber, so NoScrub keeps the rounding.
-		cc.runtimeMeta = asObject(b.scrubOrNil(roundMetaCoordinates(meta), "runtime_meta"))
+		cc.runtimeMeta, _ = b.scrubOrNil(roundMetaCoordinates(meta), "runtime_meta").(map[string]any)
 	}
 	return cc
 }
@@ -407,12 +408,26 @@ func (b *installed) scrubOrNil(v any, field string) (out any) {
 	defer func() {
 		if r := recover(); r != nil {
 			if _, logged := b.scrubPanicLogged.LoadOrStore(field, true); !logged {
-				slog.Error("baton: the Scrubber panicked; that value is not sent, and later panics on it are not logged", "field", field, "panic", r)
+				slog.Error("baton: the Scrubber panicked, or its result cannot be encoded; that value is not sent, and later panics on it are not logged", "field", field, "panic", r)
 			}
 			out = nil
 		}
 	}()
-	return b.cfg.Scrubber(v)
+	return b.scrub(v)
+}
+
+// scrub copies a custom Scrubber's result as plain JSON data, so the sender never
+// encodes a vendor type (TestAScrubbedValueThatCannotBeEncodedCostsWhatAScrubberPanicCosts).
+func (b *installed) scrub(v any) any {
+	out := b.cfg.Scrubber(v)
+	if !b.customScrubber {
+		return out
+	}
+	raw, err := json.Marshal(out)
+	if err != nil {
+		panic(fmt.Sprintf("the Scrubber's result cannot be encoded (%T)", err))
+	}
+	return jsonValue(json.RawMessage(raw))
 }
 
 func (b *installed) scrubOptionalOrNil(s, field string) *string {
@@ -432,7 +447,7 @@ func (b *installed) scrubParams(params any) map[string]any {
 		params = map[string]any{}
 	}
 	out := b.scrubOrNil(params, "params")
-	if m := asObject(out); m != nil {
+	if m, _ := out.(map[string]any); m != nil {
 		return m
 	}
 	if out != nil {
@@ -443,26 +458,11 @@ func (b *installed) scrubParams(params any) map[string]any {
 	return map[string]any{}
 }
 
-// asObject keeps a Scrubber's result that encodes as a JSON object, whatever
-// its Go type (TestAScrubbedObjectOfAnotherMapTypeIsKept). One whose encoding
-// panics is nil (TestAScrubbedObjectThatPanicsWhenEncodedCostsOnlyThatValue).
-func asObject(v any) map[string]any {
-	switch v := v.(type) {
-	case map[string]any:
-		return v
-	case nil, string:
-		return nil
-	}
-	defer func() { _ = recover() }()
-	m, _ := jsonValue(v).(map[string]any)
-	return m
-}
-
 func (b *installed) scrubValue(v any) any {
 	if v == nil {
 		return nil
 	}
-	return b.cfg.Scrubber(v)
+	return b.scrub(v)
 }
 
 func (b *installed) scrubText(s string) *string {
