@@ -2,6 +2,7 @@ package baton
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,14 +10,18 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// The numbers are baton-sdk's HttpSink defaults (SPEC §11.2 rules 3, 4, 7).
+// The numbers are baton-sdk's HttpSink defaults (SPEC §2.5, §11.2 rules 3, 4, 7).
 const (
 	bufferCap        = 1000
+	batchCap         = 100
+	batchBytes       = 1 << 20
+	flushInterval    = 5 * time.Second
 	requestTimeout   = time.Second
 	maxRetries       = 3
 	backoffBase      = 100 * time.Millisecond
@@ -25,86 +30,98 @@ const (
 	breakerReset     = 30 * time.Second
 	closeBudget      = 3 * time.Second
 	refusalBodyCap   = 500
+	answerCap        = 1 << 20
 	reportEvery      = time.Minute
 )
 
+// batchFrame is the bytes of `{"events":[` and `]}` around a batch's events.
+const batchFrame = len(`{"events":[]}`)
+
 var reportSequence microClock
 
-type outcome int
+// queued is an event waiting to be sent, or a loss report riding the next batch.
+type queued struct {
+	Event
+	written time.Time
+	// Set by the sending goroutine only, so encoding never runs on the
+	// vendor's call.
+	body      []byte
+	encodeErr error
+	isReport  bool
+	reportSum int
+}
 
-const (
-	sent outcome = iota
-	refused
-	unencodable
-	transient
-)
-
-// httpSink posts one event per request from a single goroutine, so a slow or
-// broken console never slows the vendor's tool calls.
+// httpSink posts batches of events from a single goroutine, one request at a
+// time, so a slow or broken console never slows the vendor's tool calls.
 type httpSink struct {
-	url    string
+	origin string
 	auth   string
 	client *http.Client
 
 	mu       sync.Mutex
-	queue    []Event
-	inFlight bool
+	queue    []*queued
+	inFlight []*queued
 	closed   bool
 
 	overflowWarned sync.Once
 	lateWarned     sync.Once
 
-	wake      chan struct{}
-	stop      chan struct{}
-	done      chan struct{}
-	ctx       context.Context
-	cancel    context.CancelFunc
-	closeOnce sync.Once
+	wake    chan struct{}
+	flushes chan chan struct{}
+	stop    chan struct{}
+	done    chan struct{}
+	ctx     context.Context
+	cancel  context.CancelFunc
+	// Ends a request that carries only a report: close does not wait for one.
+	reportCtx     context.Context
+	cancelReports context.CancelFunc
+	closeOnce     sync.Once
 
+	// Owned by the sending goroutine.
+	single      bool // the collector has no batch endpoint
 	failures    int
 	openedAt    time.Time
+	notBefore   time.Time
 	lastProblem string
-	backoff     time.Duration
-	reset       time.Duration
-	retryAfter  time.Duration
-	budget      time.Duration
+
+	backoff    time.Duration
+	reset      time.Duration
+	retryAfter time.Duration
+	budget     time.Duration
+	flushEvery time.Duration
 
 	// Loss reports (SPEC §11.4.7), guarded by mu.
 	reportEvery    time.Duration
 	lastReport     time.Time
-	report         *dueReport // the one in flight, or nil
+	report         *queued // due, and not yet in a batch
 	reportedSum    int
 	reportsRefused bool
 }
 
-type dueReport struct {
-	totals                           map[dropReason]int
-	sum                              int
-	tenantID, vendorID, consentToken string
-	ctx                              context.Context
-	cancel                           context.CancelFunc
-	done                             chan struct{}
-}
-
 func newHTTPSink(origin, key string) *httpSink {
 	ctx, cancel := context.WithCancel(context.Background())
+	reportCtx, cancelReports := context.WithCancel(ctx)
 	s := &httpSink{
-		url:  origin + "/v0/events",
-		auth: "Bearer " + key,
+		origin: origin,
+		auth:   "Bearer " + key,
 		client: &http.Client{
 			Timeout: requestTimeout,
-			// Following a redirect turns the POST into a GET without the event.
+			// Following a redirect turns the POST into a GET without the events.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
-		wake:       make(chan struct{}, 1),
-		stop:       make(chan struct{}),
-		done:       make(chan struct{}),
-		ctx:        ctx,
-		cancel:     cancel,
-		backoff:    backoffBase,
-		reset:      breakerReset,
-		retryAfter: backoffMax,
-		budget:     closeBudget,
+		wake:          make(chan struct{}, 1),
+		flushes:       make(chan chan struct{}),
+		stop:          make(chan struct{}),
+		done:          make(chan struct{}),
+		ctx:           ctx,
+		cancel:        cancel,
+		reportCtx:     reportCtx,
+		cancelReports: cancelReports,
+		backoff:       backoffBase,
+		reset:         breakerReset,
+		retryAfter:    backoffMax,
+		budget:        closeBudget,
+		flushEvery:    flushInterval,
 
 		reportEvery: reportEvery,
 	}
@@ -141,27 +158,26 @@ func (s *httpSink) push(e Event) bool {
 		s.popFront()
 		processDrops.add(dropBufferFull, 1)
 	}
-	s.queue = append(s.queue, e)
+	s.queue = append(s.queue, &queued{Event: e, written: time.Now()})
 	return full
 }
 
-// putBack returns e, which is older than everything queued, to the front.
-// When the queue is full, e is the oldest and is the one dropped.
-func (s *httpSink) putBack(e Event) bool {
-	if len(s.queue) >= bufferCap {
-		processDrops.add(dropBufferFull, 1)
-		return true
-	}
-	s.queue = slices.Insert(s.queue, 0, e)
-	return false
+// putBack returns a failed batch, which is older than everything queued, to
+// the front. When that overfills the queue, the batch's oldest are the ones
+// dropped. It returns how many it dropped. The caller holds s.mu.
+func (s *httpSink) putBack(batch []*queued) int {
+	over := max(0, len(s.queue)+len(batch)-bufferCap)
+	processDrops.add(dropBufferFull, over)
+	s.queue = slices.Insert(s.queue, 0, batch[over:]...)
+	return over
 }
 
 // popFront clears the slot so the popped event's payload can be collected.
-func (s *httpSink) popFront() Event {
-	e := s.queue[0]
-	s.queue[0] = Event{}
+func (s *httpSink) popFront() *queued {
+	q := s.queue[0]
+	s.queue[0] = nil
 	s.queue = s.queue[1:]
-	return e
+	return q
 }
 
 func (s *httpSink) warnOverflow() {
@@ -173,82 +189,283 @@ func (s *httpSink) warnOverflow() {
 
 func (s *httpSink) run() {
 	defer close(s.done)
-	var retry <-chan time.Time
+	var due <-chan time.Time
 	for {
+		var flushed chan struct{}
 		select {
 		case <-s.wake:
-		case <-retry:
+		case <-due:
+		case flushed = <-s.flushes:
 		case <-s.stop:
-			s.drain()
+			s.drain(true)
 			return
 		}
-		retry = nil
-		if !s.drain() {
-			retry = time.After(s.retryAfter)
+		due = nil
+		if wait := s.drain(flushed != nil); wait > 0 {
+			due = time.After(wait)
+		}
+		if flushed != nil {
+			close(flushed)
 		}
 	}
 }
 
-// drain sends until the queue is empty, and reports whether it got there.
-func (s *httpSink) drain() bool {
-	for s.breakerAllows() {
-		s.mu.Lock()
-		// Once close has given up, what is queued is close's to count.
-		if empty := len(s.queue) == 0; empty || s.ctx.Err() != nil {
-			s.mu.Unlock()
-			return empty
+// drain sends every batch that is due, or everything when force is set, and
+// returns how long until it should run again; 0 means nothing is waiting.
+func (s *httpSink) drain(force bool) time.Duration {
+	for {
+		if !s.breakerAllows() {
+			return s.retryAfter
 		}
-		e := s.popFront()
-		s.inFlight = true
-		s.mu.Unlock()
+		if wait := time.Until(s.notBefore); wait > 0 {
+			return wait
+		}
+		batch, wait := s.nextBatch(force)
+		if batch == nil {
+			return wait
+		}
+		kept, failed := s.deliver(batch)
 
-		result := s.send(e)
-
 		s.mu.Lock()
-		s.inFlight = false
-		stopped := result == transient && s.ctx.Err() != nil
-		dropped := result == transient && !stopped && s.putBack(e)
-		var report *dueReport
-		if result == sent {
-			report = s.reportDue(e)
+		s.inFlight = nil
+		stopped := failed && s.ctx.Err() != nil
+		dropped := 0
+		if failed && !stopped {
+			dropped = s.putBack(kept)
 		}
 		s.mu.Unlock()
-		if report != nil {
-			go s.sendReport(report)
-		}
 		if stopped {
-			processDrops.add(dropUnsentAtClose, 1)
+			processDrops.add(dropUnsentAtClose, len(kept))
 		}
-		if dropped {
+		if dropped > 0 {
 			s.warnOverflow()
 		}
-
-		switch result {
-		case sent, refused:
-			if result == sent {
-				processDrops.logRecovery()
-			}
+		if !failed {
 			s.failures = 0
 			s.openedAt = time.Time{}
-		case transient:
-			s.failures++
-			if s.failures >= breakerThreshold {
-				s.openedAt = time.Now()
-				slog.Warn("baton: the console is failing; events are kept and sending pauses",
-					"pause", s.reset, "last_problem", s.lastProblem)
-			}
-			return false
+			continue
 		}
+		s.failures++
+		if s.failures >= breakerThreshold {
+			s.openedAt = time.Now()
+			slog.Warn("baton: the console is failing; events are kept and sending pauses",
+				"pause", s.reset, "last_problem", s.lastProblem)
+		}
+		return max(s.retryAfter, time.Until(s.notBefore))
 	}
-	return false
 }
 
-// reportDue says whether to send a report of this process's loss totals,
-// beside the drain and outside the queue, so it never delays an event and is
-// never counted as one. The caller holds s.mu.
-func (s *httpSink) reportDue(delivered Event) *dueReport {
+// nextBatch takes the next batch off the queue when one is due, and otherwise
+// returns how long until the oldest waiting entry makes one due.
+func (s *httpSink) nextBatch(force bool) ([]*queued, time.Duration) {
+	limit := batchCap
+	if s.single {
+		limit = 1
+	}
+	s.mu.Lock()
+	// Once close has given up, what is queued is close's to count.
+	if s.ctx.Err() != nil {
+		s.mu.Unlock()
+		return nil, 0
+	}
+	front := slices.Clone(s.queue[:min(len(s.queue), limit)])
+	more := len(s.queue) > limit
+	report := s.report
+	s.mu.Unlock()
+	if len(front) == 0 && report == nil {
+		return nil, 0
+	}
+
+	size, encoded := batchFrame, 0
+	fits := func(q *queued) bool {
+		return q.body == nil || encoded == 0 || size+1+len(q.body) <= batchBytes
+	}
+	add := func(q *queued) {
+		if q.body != nil {
+			size += len(q.body) + min(encoded, 1)
+			encoded++
+		}
+	}
+	cut := 0
+	for _, q := range front {
+		s.encode(q)
+		if !fits(q) {
+			break
+		}
+		add(q)
+		cut++
+	}
+	withReport := false
+	if report != nil && cut == len(front) && !more && cut < limit {
+		s.encode(report)
+		withReport = report.body != nil && fits(report)
+	}
+	oldest := report
+	if len(front) > 0 {
+		oldest = front[0]
+	}
+	full := cut < len(front) || len(front) == limit
+	if wait := time.Until(oldest.written.Add(s.flushEvery)); !force && !full && wait > 0 {
+		return nil, wait
+	}
+
+	s.mu.Lock()
+	var batch, unencodable []*queued
+	// Write may have dropped some of front meanwhile, always from the front
+	// of the queue, so what is left of it is still the queue's front.
+	for i := 0; i < cut && len(s.queue) > 0; i++ {
+		if front[i] != s.queue[0] {
+			continue
+		}
+		q := s.popFront()
+		if q.body == nil {
+			unencodable = append(unencodable, q)
+		} else {
+			batch = append(batch, q)
+		}
+	}
+	if report != nil && (withReport || report.encodeErr != nil) {
+		s.report = nil
+		if withReport {
+			batch = append(batch, report)
+		}
+	}
+	s.inFlight = batch
+	s.mu.Unlock()
+	for _, q := range unencodable {
+		processDrops.add(dropEncodeFailed, 1)
+		slog.Warn("baton: an event could not be encoded and has been dropped; the events after it are still sent",
+			"event_type", q.EventType, "error_type", fmt.Sprintf("%T", q.encodeErr))
+	}
+	if batch == nil {
+		// Everything taken was unencodable or already dropped: look again.
+		return s.nextBatch(force)
+	}
+	return batch, 0
+}
+
+func (s *httpSink) encode(q *queued) {
+	if q.body == nil && q.encodeErr == nil {
+		q.body, q.encodeErr = encodeEvent(q.Event)
+	}
+}
+
+// eventsOf leaves out the loss report: a report is never counted as lost
+// (SPEC §11.4.7), nor kept for a later batch.
+func eventsOf(batch []*queued) []*queued {
+	return slices.DeleteFunc(slices.Clone(batch), func(q *queued) bool { return q.isReport })
+}
+
+// deliver sends batch, splitting it on 413 and switching to one event per
+// request on the batch path's 404 or 405. On a transient failure it returns
+// the events it did not deliver, in order.
+func (s *httpSink) deliver(batch []*queued) (kept []*queued, failed bool) {
+	if s.single && len(batch) > 1 {
+		for i := range batch {
+			if _, failed := s.deliver(batch[i : i+1]); failed {
+				return eventsOf(batch[i:]), true
+			}
+		}
+		return nil, false
+	}
+	status, answer, ok := s.post(batch)
+	switch {
+	case !ok:
+		return eventsOf(batch), true
+	case status >= 200 && status < 300:
+		s.settle(batch, answer)
+	case !s.single && (status == http.StatusNotFound || status == http.StatusMethodNotAllowed):
+		s.single = true
+		slog.Info("baton: the collector has no batch endpoint; sending one event per request")
+		return s.deliver(batch)
+	case status == http.StatusRequestEntityTooLarge && len(batch) > 1:
+		half := len(batch) / 2
+		if kept, failed := s.deliver(batch[:half]); failed {
+			return append(kept, eventsOf(batch[half:])...), true
+		}
+		return s.deliver(batch[half:])
+	default:
+		s.refuse(batch, status, answer)
+	}
+	return nil, false
+}
+
+type batchAnswer struct {
+	Results []struct {
+		Status string `json:"status"`
+		Error  struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	} `json:"results"`
+}
+
+// settle reads a 2xx answer's per-event results, in the order sent. An event
+// with no readable result counts as delivered: the 2xx says the collector
+// took the batch, and resending it could only make duplicates.
+func (s *httpSink) settle(batch []*queued, answer []byte) {
+	var parsed batchAnswer
+	if !s.single {
+		_ = json.Unmarshal(answer, &parsed)
+	}
+	var delivered *queued
+	refused, code := 0, ""
+	for i, q := range batch {
+		status := "accepted"
+		if i < len(parsed.Results) {
+			status = parsed.Results[i].Status
+		}
+		switch {
+		case q.isReport:
+			s.mu.Lock()
+			if status == "refused" {
+				s.reportsRefused = true
+			} else {
+				s.reportedSum = max(s.reportedSum, q.reportSum)
+			}
+			s.mu.Unlock()
+		case status == "refused":
+			refused++
+			code = cmp.Or(code, parsed.Results[i].Error.Code)
+		case delivered == nil:
+			delivered = q
+		}
+	}
+	if refused > 0 {
+		processDrops.add(dropRefused, refused)
+		slog.Warn("baton: the collector REFUSED events in a batch and they have been dropped; nothing retries a refusal",
+			"refused", refused, "code", code)
+	}
+	if delivered != nil {
+		processDrops.logRecovery()
+		s.reportDue(delivered.Event)
+	}
+}
+
+// refuse drops a batch the collector refused as a whole.
+func (s *httpSink) refuse(batch []*queued, status int, answer []byte) {
+	events := eventsOf(batch)
+	if len(events) < len(batch) && (status == http.StatusBadRequest || status == http.StatusUnprocessableEntity) {
+		// A collector that predates client_report refuses it this way.
+		s.mu.Lock()
+		s.reportsRefused = true
+		s.mu.Unlock()
+	}
+	if len(events) == 0 {
+		return
+	}
+	processDrops.add(dropRefused, len(events))
+	slog.Warn("baton: the collector REFUSED events and they have been dropped; nothing retries a 4xx",
+		"status", status, "events", len(events),
+		"body", strings.ToValidUTF8(string(answer[:min(len(answer), refusalBodyCap)]), "?"))
+}
+
+// reportDue queues a report of this process's loss totals for the next batch.
+// The caller does not hold s.mu.
+func (s *httpSink) reportDue(delivered Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.closed || s.reportsRefused || s.report != nil || time.Since(s.lastReport) < s.reportEvery {
-		return nil
+		return
 	}
 	totals := processDrops.totals()
 	sum := 0
@@ -257,79 +474,31 @@ func (s *httpSink) reportDue(delivered Event) *dueReport {
 	}
 	// Totals only grow, so their sum tells whether they changed.
 	if sum == s.reportedSum {
-		return nil
-	}
-	s.lastReport = time.Now()
-	ctx, cancel := context.WithCancel(s.ctx)
-	s.report = &dueReport{
-		totals: totals, sum: sum,
-		tenantID: delivered.TenantID, vendorID: delivered.VendorID, consentToken: delivered.ConsentToken,
-		ctx: ctx, cancel: cancel, done: make(chan struct{}),
-	}
-	return s.report
-}
-
-func (s *httpSink) sendReport(due *dueReport) {
-	status := 0
-	defer close(due.done)
-	defer due.cancel()
-	defer func() {
-		// A report is optional; nothing in it may take the vendor's process down.
-		_ = recover()
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		s.report = nil
-		switch {
-		case status == http.StatusBadRequest || status == http.StatusUnprocessableEntity:
-			s.reportsRefused = true
-		case status >= 200 && status < 300:
-			s.reportedSum = due.sum
-		}
-	}()
-	body, err := json.Marshal(Event{
-		EventID:        uuid7(),
-		TenantID:       due.tenantID,
-		VendorID:       due.vendorID,
-		SessionID:      processDrops.instanceID,
-		SequenceNumber: reportSequence.next(),
-		CapturedAt:     time.Now().UTC().Format(time.RFC3339Nano),
-		ConsentToken:   due.consentToken,
-		SDKVersion:     sdkVersion,
-		AgentRuntime:   "unknown",
-		EventType:      "client_report",
-		Payload:        clientReport{InstanceID: processDrops.instanceID, Dropped: due.totals},
-	})
-	if err != nil {
 		return
 	}
-	status, _, _ = s.do(due.ctx, body)
+	s.lastReport = time.Now()
+	s.report = &queued{
+		Event: Event{
+			EventID:        uuid7(),
+			TenantID:       delivered.TenantID,
+			VendorID:       delivered.VendorID,
+			SessionID:      processDrops.instanceID,
+			SequenceNumber: reportSequence.next(),
+			CapturedAt:     time.Now().UTC().Format(time.RFC3339Nano),
+			ConsentToken:   delivered.ConsentToken,
+			SDKVersion:     sdkVersion,
+			AgentRuntime:   "unknown",
+			EventType:      "client_report",
+			Payload:        clientReport{InstanceID: processDrops.instanceID, Dropped: totals},
+		},
+		written:   time.Now(),
+		isReport:  true,
+		reportSum: sum,
+	}
 }
 
 func (s *httpSink) breakerAllows() bool {
 	return s.openedAt.IsZero() || time.Since(s.openedAt) >= s.reset
-}
-
-func (s *httpSink) send(e Event) outcome {
-	body, err := encodeEvent(e)
-	if err != nil {
-		processDrops.add(dropEncodeFailed, 1)
-		slog.Warn("baton: an event could not be encoded and has been dropped; the events after it are still sent",
-			"event_type", e.EventType, "error_type", fmt.Sprintf("%T", err))
-		return unencodable
-	}
-	for attempt := 0; ; attempt++ {
-		if result := s.post(body); result != transient {
-			return result
-		}
-		if attempt == maxRetries {
-			return transient
-		}
-		select {
-		case <-time.After(min(s.backoff<<attempt, backoffMax)):
-		case <-s.ctx.Done():
-			return transient
-		}
-	}
 }
 
 type encodePanicked struct{}
@@ -347,42 +516,106 @@ func encodeEvent(e Event) (body []byte, err error) {
 	return json.Marshal(e)
 }
 
-// do posts body and returns the status and the start of the answer's body.
-func (s *httpSink) do(ctx context.Context, body []byte) (int, []byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.url, bytes.NewReader(body))
+// post sends batch, retrying a transient failure with backoff, and returns
+// the answer, or ok false when every try failed.
+func (s *httpSink) post(batch []*queued) (status int, answer []byte, ok bool) {
+	ctx := s.ctx
+	if len(eventsOf(batch)) == 0 {
+		ctx = s.reportCtx
+	}
+	url, body := s.origin+"/v0/events", batch[0].body
+	if !s.single {
+		url = s.origin + "/v0/events/batch"
+		var b bytes.Buffer
+		b.WriteString(`{"events":[`)
+		for i, q := range batch {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.Write(q.body)
+		}
+		b.WriteString(`]}`)
+		body = b.Bytes()
+	}
+	for attempt := 0; ; attempt++ {
+		status, answer, wait, err := s.do(ctx, url, body)
+		switch {
+		case err != nil:
+			s.lastProblem = err.Error()
+		case status >= 200 && status < 300 || status >= 400 && status < 500 && status != http.StatusTooManyRequests:
+			return status, answer, true
+		default:
+			s.lastProblem = fmt.Sprintf("%d %s", status, http.StatusText(status))
+		}
+		if wait > 0 {
+			s.notBefore = time.Now().Add(wait)
+			return 0, nil, false
+		}
+		if attempt == maxRetries {
+			return 0, nil, false
+		}
+		select {
+		case <-time.After(min(s.backoff<<attempt, backoffMax)):
+		case <-ctx.Done():
+			return 0, nil, false
+		}
+	}
+}
+
+// do posts body and returns the status, the answer's body, and on a 429 the
+// wait its Retry-After asks for.
+func (s *httpSink) do(ctx context.Context, url string, body []byte) (int, []byte, time.Duration, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, 0, err
 	}
 	req.Header.Set("Authorization", s.auth)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, 0, err
 	}
-	detail, _ := io.ReadAll(io.LimitReader(resp.Body, refusalBodyCap))
+	answer, _ := io.ReadAll(io.LimitReader(resp.Body, answerCap))
 	// Reading to the end lets the connection be reused.
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	resp.Body.Close()
-	return resp.StatusCode, detail, nil
+	var wait time.Duration
+	if resp.StatusCode == http.StatusTooManyRequests {
+		if secs, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After"))); err == nil && secs > 0 {
+			// A collector's mistake must not stop delivery for hours.
+			wait = min(time.Duration(secs)*time.Second, breakerReset)
+		}
+	}
+	return resp.StatusCode, answer, wait, nil
 }
 
-func (s *httpSink) post(body []byte) outcome {
-	status, detail, err := s.do(s.ctx, body)
-	if err != nil {
-		s.lastProblem = err.Error()
-		return transient
+// flush sends what is queued at once, and returns when that is done, at ctx's
+// deadline, or after s.budget when ctx has none.
+func (s *httpSink) flush(ctx context.Context) {
+	ctx, cancel := s.withBudget(ctx)
+	defer cancel()
+	flushed := make(chan struct{})
+	select {
+	case s.flushes <- flushed:
+	case <-s.done:
+		return
+	case <-ctx.Done():
+		return
 	}
-	switch {
-	case status >= 200 && status < 300:
-		return sent
-	case status >= 400 && status < 500 && status != http.StatusTooManyRequests:
-		processDrops.add(dropRefused, 1)
-		slog.Warn("baton: the collector REFUSED an event and it has been dropped; nothing retries a 4xx",
-			"status", status, "body", strings.ToValidUTF8(string(detail), "?"))
-		return refused
+	select {
+	case <-flushed:
+	case <-ctx.Done():
 	}
-	s.lastProblem = fmt.Sprintf("%d %s", status, http.StatusText(status))
-	return transient
+}
+
+func (s *httpSink) withBudget(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, s.budget)
 }
 
 // close sends what is queued until ctx's deadline, or for s.budget when ctx
@@ -400,23 +633,12 @@ func (s *httpSink) close(ctx context.Context) {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		s.closed = true
-		report := s.report
+		// SPEC §11.4.7: no report at close; the collector is often why there is loss.
+		s.report = nil
 		s.mu.Unlock()
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		if _, ok := ctx.Deadline(); !ok {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, s.budget)
-			defer cancel()
-		}
-		if report != nil {
-			report.cancel()
-			select {
-			case <-report.done:
-			case <-ctx.Done():
-			}
-		}
+		s.cancelReports()
+		ctx, cancel := s.withBudget(ctx)
+		defer cancel()
 		close(s.stop)
 		select {
 		case <-s.done:
@@ -426,12 +648,10 @@ func (s *httpSink) close(ctx context.Context) {
 		s.client.CloseIdleConnections()
 		s.mu.Lock()
 		unsent = len(s.queue)
-		inFlight := s.inFlight
+		inFlight := len(eventsOf(s.inFlight))
 		s.mu.Unlock()
-		// One being sent is counted by drain, when its send ends.
+		// Those being sent are counted by drain, when their send ends.
 		processDrops.add(dropUnsentAtClose, unsent)
-		if inFlight {
-			unsent++
-		}
+		unsent += inFlight
 	})
 }

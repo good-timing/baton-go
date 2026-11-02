@@ -110,6 +110,18 @@ func TestANewLossIsReportedOnceTheIntervalPassed(t *testing.T) {
 	}
 }
 
+// reportIDs is how many different reports arrived: a failed one is retried
+// under its own event_id.
+func (c *fakeConsole) reportIDs() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ids := map[any]bool{}
+	for _, r := range c.reports {
+		ids[r["event_id"]] = true
+	}
+	return len(ids)
+}
+
 func TestAFailedReportIsNotCountedAndIsSentAgain(t *testing.T) {
 	for _, status := range []int{500, 401, reportDrop} {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {
@@ -117,8 +129,8 @@ func TestAFailedReportIsNotCountedAndIsSentAgain(t *testing.T) {
 			s, console := reportSink(t, []int{400, 202, 202}, status)
 			s.reportEvery = 0
 			sendAll(t, s, 3)
-			if console.reportCount() != 2 || processDrops.totals()[dropRefused] != 1 || len(processDrops.totals()) != 1 {
-				t.Errorf("%d reports, counts %v", console.reportCount(), processDrops.totals())
+			if console.reportIDs() != 2 || processDrops.totals()[dropRefused] != 1 || len(processDrops.totals()) != 1 {
+				t.Errorf("%d reports, counts %v", console.reportIDs(), processDrops.totals())
 			}
 		})
 	}
@@ -141,30 +153,51 @@ func TestACollectorThatRefusesReportsGetsNoMore(t *testing.T) {
 	}
 }
 
-func TestOneReportAtATimeAndCloseEndsIt(t *testing.T) {
+func TestAReportRefusedInABatchStopsReports(t *testing.T) {
 	captureLogs(t)
-	s, console := reportSink(t, []int{400, 202, 400, 202}, reportHang)
+	s, console := reportSink(t, []int{400, 202, 202, 400, 202}, 0)
 	s.reportEvery = 0
-	for i := range 4 {
-		s.write(testEvent(i))
-		waitFor(t, "a send", func() bool { return idle(s) })
+	console.refuse = func(e map[string]any) bool { return e["event_type"] == "client_report" }
+	sendAll(t, s, 1)
+	writeBesideAReport(t, s, console)
+	s.flushEvery = 0
+	sendAll(t, s, 2)
+	if console.count() != 5 || console.reportCount() != 1 || console.reportsAlone != 0 {
+		t.Errorf("%d requests, %d reports, %d alone; want 5, 1, 0", console.count(), console.reportCount(), console.reportsAlone)
 	}
-	if console.reportCount() != 1 || reportIdle(s) {
-		t.Fatalf("%d reports, idle %v", console.reportCount(), reportIdle(s))
+}
+
+// writeBesideAReport delivers one event by the timer, so the report it makes
+// due waits too, then writes another, which goes in the report's batch.
+func writeBesideAReport(t *testing.T, s *httpSink, console *fakeConsole) {
+	t.Helper()
+	s.flushEvery = 200 * time.Millisecond
+	before := console.count()
+	s.write(tenantEvent(1))
+	waitFor(t, "the delivery", func() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.report != nil })
+	s.write(tenantEvent(2))
+	waitFor(t, "the batch", func() bool { return console.count() == before+2 && idle(s) })
+}
+
+func TestCloseEndsAReportBeingSent(t *testing.T) {
+	captureLogs(t)
+	s, console := reportSink(t, []int{400, 202, 202}, reportHang)
+	s.reportEvery = 0
+	sendAll(t, s, 1)
+	s.write(tenantEvent(1))
+	waitFor(t, "the report", func() bool { return console.reportCount() == 1 })
+	s.write(tenantEvent(2))
+	time.Sleep(50 * time.Millisecond)
+	if console.count() != 2 {
+		t.Fatalf("%d requests while the report hangs, want 2: one in flight at a time", console.count())
 	}
 	start := time.Now()
 	s.close(context.Background())
 	if took := time.Since(start); took > 500*time.Millisecond {
 		t.Errorf("close took %v", took)
 	}
-	// Close ends the report itself, well before the request timeout.
-	for deadline := time.Now().Add(300 * time.Millisecond); !reportIdle(s); time.Sleep(5 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("the report outlived close")
-		}
-	}
-	if processDrops.totals()[dropRefused] != 2 || len(processDrops.totals()) != 1 {
-		t.Errorf("counts %v", processDrops.totals())
+	if console.count() != 3 || processDrops.totals()[dropRefused] != 1 || len(processDrops.totals()) != 1 {
+		t.Errorf("%d requests, counts %v", console.count(), processDrops.totals())
 	}
 }
 
@@ -174,8 +207,8 @@ func TestAReportThatGetsNoAnswerTimesOut(t *testing.T) {
 	s.reportEvery = 0
 	s.client.Timeout = 20 * time.Millisecond
 	sendAll(t, s, 3)
-	if console.reportCount() != 2 {
-		t.Errorf("%d reports, want 2", console.reportCount())
+	if console.reportIDs() != 2 {
+		t.Errorf("%d reports, want 2", console.reportIDs())
 	}
 }
 
@@ -185,27 +218,18 @@ func TestNoReportStartsOnceCloseBegan(t *testing.T) {
 	s.reportEvery = 0
 	sendAll(t, s, 1)
 	s.close(context.Background())
-	s.mu.Lock()
-	due := s.reportDue(testEvent(2))
-	s.mu.Unlock()
-	if due != nil || console.reportCount() != 0 {
+	s.reportDue(testEvent(2))
+	if !reportIdle(s) || console.reportCount() != 0 {
 		t.Errorf("a report started after close")
 	}
 }
 
-func TestAFinishedReportReleasesItsContext(t *testing.T) {
+func TestAReportRidesTheNextBatch(t *testing.T) {
 	captureLogs(t)
-	s, console := reportSink(t, []int{400}, 0)
+	s, console := reportSink(t, []int{400, 202, 202}, 0)
 	sendAll(t, s, 1)
-	s.mu.Lock()
-	s.reportedSum = -1
-	due := s.reportDue(tenantEvent(1))
-	s.mu.Unlock()
-	if due == nil {
-		t.Fatal("no report was due")
-	}
-	s.sendReport(due)
-	if console.reportCount() == 0 || due.ctx.Err() == nil || !reportIdle(s) {
-		t.Errorf("%d reports; context %v; idle %v", console.reportCount(), due.ctx.Err(), reportIdle(s))
+	writeBesideAReport(t, s, console)
+	if console.count() != 3 || console.reportCount() != 1 || console.reportsAlone != 0 {
+		t.Errorf("%d requests, %d reports, %d alone; want 3, 1, 0", console.count(), console.reportCount(), console.reportsAlone)
 	}
 }

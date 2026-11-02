@@ -65,11 +65,7 @@ func TestShutdownScenarios(t *testing.T) {
 			logs := captureLogs(t)
 			url := startCollector(t, collectorScenario{Mode: sc.Mode, DelayMS: sc.DelayMS})
 			server := mcp.NewServer(&mcp.Implementation{Name: "echo-server"}, nil)
-			handle, sent := installEcho(t, server, url, func(s *httpSink) {
-				s.client.Timeout = ms(settings.RequestTimeoutMS)
-				s.budget = ms(settings.ShutdownBudgetMS)
-				s.backoff = ms(settings.BackoffBaseMS)
-			})
+			handle, sent := installEcho(t, server, url, settings.apply)
 			cs := connect(t, server)
 
 			// Closes run off the test goroutine, so one that never returns

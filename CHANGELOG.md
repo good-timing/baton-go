@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Events are sent in batches** (SPEC §2.5), to `POST /v0/events/batch`,
+  one request at a time. A batch goes when 100 events are waiting, when it
+  would pass 1 MiB, or 5 seconds after the oldest waiting event. `Close`
+  sends at once. So an event can reach Baton up to 5 seconds after it was
+  recorded, and a process that stops without `Close` can lose those last
+  5 seconds of events. A collector without the batch endpoint (it answers
+  404 or 405) still works: the SDK then sends one event per request to
+  `/v0/events`, and loses nothing in the switch.
+
 ## 0.1.4
 
 - **Prompt, resource and tool-list requests are recorded** (SPEC §11.4.4,

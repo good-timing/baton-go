@@ -27,6 +27,7 @@ type collectorScenario struct {
 		Accepted *int `json:"accepted"`
 		Dropped  *int `json:"dropped"`
 		Reports  *int `json:"reports"`
+		Requests *int `json:"requests"`
 	} `json:"expect"`
 }
 
@@ -109,9 +110,7 @@ func TestTheSinkKeepsItsPromisesAgainstABrokenCollector(t *testing.T) {
 			logs := captureLogs(t)
 			url := startCollector(t, sc)
 			s := newHTTPSink(url, testKey)
-			s.client.Timeout = ms(spec.Settings.RequestTimeoutMS)
-			s.budget = ms(spec.Settings.ShutdownBudgetMS)
-			s.backoff = ms(spec.Settings.BackoffBaseMS)
+			spec.Settings.apply(s)
 
 			for n := 1; n <= sc.Events; n++ {
 				started := time.Now()
@@ -164,6 +163,9 @@ func TestTheSinkKeepsItsPromisesAgainstABrokenCollector(t *testing.T) {
 			}
 			if want := sc.Expect.Dropped; want != nil && dropped != *want {
 				t.Errorf("counted %v, want %d", processDrops.totals(), *want)
+			}
+			if want := sc.Expect.Requests; want != nil && r.Requests != *want {
+				t.Errorf("%d requests, want %d", r.Requests, *want)
 			}
 			if want := sc.Expect.Reports; want != nil && r.Reports != *want {
 				t.Errorf("%d reports, want %d", r.Reports, *want)

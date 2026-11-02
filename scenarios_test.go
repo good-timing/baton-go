@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -13,9 +14,21 @@ import (
 // Helpers for the runners of baton-spec's collector/*.json scenarios.
 
 type collectorSettings struct {
-	RequestTimeoutMS int `json:"request_timeout_ms"`
-	ShutdownBudgetMS int `json:"shutdown_budget_ms"`
-	BackoffBaseMS    int `json:"backoff_base_ms"`
+	RequestTimeoutMS int  `json:"request_timeout_ms"`
+	ShutdownBudgetMS int  `json:"shutdown_budget_ms"`
+	BackoffBaseMS    int  `json:"backoff_base_ms"`
+	FlushIntervalMS  *int `json:"flush_interval_ms"`
+}
+
+// apply gives s these settings; one that is absent keeps the sink's default.
+func (c collectorSettings) apply(s *httpSink) {
+	ms := func(n int) time.Duration { return time.Duration(n) * time.Millisecond }
+	s.client.Timeout = ms(c.RequestTimeoutMS)
+	s.budget = ms(c.ShutdownBudgetMS)
+	s.backoff = ms(c.BackoffBaseMS)
+	if c.FlushIntervalMS != nil {
+		s.flushEvery = ms(*c.FlushIntervalMS)
+	}
 }
 
 // readScenarios reads collector/name into into, and skips the test where
