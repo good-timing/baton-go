@@ -1,0 +1,10 @@
+2026/11/03 00:33:02 WARN baton: the event buffer is full; the oldest events are dropped. Further overflows are silent cap=1000
+2026/11/03 00:33:02 WARN baton: delivering again; 2 event(s) lost before this: buffer_full 2.
+2026/11/03 00:33:03 WARN baton: the event buffer is full; the oldest events are dropped. Further overflows are silent cap=1000
+2026/11/03 00:33:06 WARN baton: the event buffer is full; the oldest events are dropped. Further overflows are silent cap=1000
+2026/11/03 00:33:09 WARN baton: closed with events unsent unsent=1001
+2026/11/03 00:33:09 WARN baton: the event buffer is full; the oldest events are dropped. Further overflows are silent cap=1000
+2026/11/03 00:33:11 WARN baton: closed with events unsent unsent=1000
+2026/11/03 00:33:11 WARN baton: the event buffer is full; the oldest events are dropped. Further overflows are silent cap=1000
+2026/11/03 00:33:17 WARN baton: the event buffer is full; the oldest events are dropped. Further overflows are silent cap=1000
+2026/11/03 00:33:24 WARN baton: closed with events unsent unsent=1000
