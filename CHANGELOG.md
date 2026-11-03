@@ -15,9 +15,9 @@
   running, so while 64 timed-out calls are still running in the process, the
   hook is not called at all. Calls that finish in time never count.
 
-- **With no DSN, a bad `AnnotationToolName` is an error,** as every other bad
-  setting already was, and as in `baton-sdk`. Before, it was let through and
-  Baton installed nothing.
+- **With no DSN and `ReportMode: "on"`, a bad `AnnotationToolName` is an
+  error,** as it is with a DSN, and as in `baton-sdk`. Before, it was let
+  through and Baton installed nothing.
 
 ## 0.1.5
 

@@ -512,6 +512,10 @@ func TestWithoutADSNABadSettingStillFails(t *testing.T) {
 			t.Errorf("%s: installed with no error", name)
 		}
 	}
+	// The report tool is not served, so its name is not used.
+	if _, err := Install(newVectorServer(), Config{AnnotationToolName: "not a name"}); err != nil {
+		t.Errorf("an unused report tool name failed: %v", err)
+	}
 }
 
 func TestTheEnvironmentDSNIsUsed(t *testing.T) {
