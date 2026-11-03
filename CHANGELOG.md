@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.5
 
 - **Events are sent in batches** (SPEC §2.5), to `POST /v0/events/batch`,
   one request at a time. A batch goes when 100 events are waiting, when it
