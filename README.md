@@ -95,21 +95,21 @@ Only what crosses the MCP call. The SDK never reads your logs, your database or 
 
 ## Who is calling
 
-**Nothing is captured about the person behind a call unless you say how to find them.** Pass `ResolvePrincipal`: it runs on every tool call, receives the request's verified token, and returns a `*baton.Principal` or `nil`.
+**Nothing is captured about the person behind a call unless you say how to find them.** Pass `ResolvePrincipal`: it runs on every tool call, listing, prompt get and resource read, receives a `baton.Caller` (the verified token, the HTTP headers, `_meta`, the tool's name and its arguments), and returns a `*baton.Principal` or `nil`.
 
 ```go
 baton.Install(server, baton.Config{
 	DSN: "https://baton_pk_...@baton.goodtiming.ai/ten_.../your-vendor",
-	ResolvePrincipal: func(ctx context.Context, token *auth.TokenInfo) (*baton.Principal, error) {
-		if token == nil || token.UserID == "" {
+	ResolvePrincipal: func(ctx context.Context, c baton.Caller) (*baton.Principal, error) {
+		if c.Token == nil || c.Token.UserID == "" {
 			return nil, nil
 		}
-		return &baton.Principal{ID: token.UserID}, nil
+		return &baton.Principal{ID: c.Token.UserID}, nil
 	},
 })
 ```
 
-`auth` is `github.com/modelcontextprotocol/go-sdk/auth`. A token exists only on streamable HTTP behind go-sdk's `auth.RequireBearerToken`. On stdio `token` is nil, so name the user from whatever you authenticated them with. If the hook returns an error or panics, that call is sent without a principal. Set `DisplayName` to choose what your dashboard shows for a person.
+A token exists only on streamable HTTP behind go-sdk's `auth.RequireBearerToken`. On stdio and SSE `c.Token` and `c.Header` are nil, so name the user from whatever you authenticated them with. `ctx` ends with the request, after 5 seconds, or once Baton has the answer. If the hook returns an error, panics or takes longer than 5 seconds, that call is sent without a principal, and the call goes on. Use `ctx`: a hook that ignores it keeps running, and while 64 timed-out calls are still running in the process Baton stops calling it. For OAuth, `baton.PrincipalFromOAuthSub` and `baton.PrincipalFromOAuthEmail` read the `sub` or `email` claim from `c.Token.Extra`; pass one as `ResolvePrincipal`, or call one inside your own hook. Set `DisplayName` to choose what your dashboard shows for a person.
 
 The id is sent as your hook returns it, so the hook decides what is safe to send. An id longer than 128 characters is cut to 128, and a blank one is not sent. A display name longer than 128 characters is not sent. To send a pseudonym instead, hash the id inside your hook and set `Hashed: true`.
 

@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- **`ResolvePrincipal` takes a `baton.Caller`,** as the hooks in `baton-sdk`
+  and `baton-ts` take one context: the verified token, the HTTP headers,
+  `_meta`, the tool's name and its arguments (without `user_goal`). **This
+  breaks a hook written for 0.1.5 or earlier:** change `token *auth.TokenInfo` to
+  `c baton.Caller` and read `c.Token`.
+- **`PrincipalFromOAuthSub` and `PrincipalFromOAuthEmail`** read the `sub` or
+  `email` claim from the token's `Extra`, as in `baton-ts`.
+- **A `ResolvePrincipal` that takes longer than 5 seconds is cut off,** as in
+  `baton-sdk` and `baton-ts`: the call goes on, its event has no principal,
+  and the first time a warning is logged. A hook that ignores `ctx` keeps
+  running, so while 64 timed-out calls are still running in the process, the
+  hook is not called at all. Calls that finish in time never count.
+
+- **With no DSN, a bad `AnnotationToolName` is an error,** as every other bad
+  setting already was, and as in `baton-sdk`. Before, it was let through and
+  Baton installed nothing.
+
 ## 0.1.5
 
 - **Events are sent in batches** (SPEC §2.5), to `POST /v0/events/batch`,

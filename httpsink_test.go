@@ -17,6 +17,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type fakeConsole struct {
@@ -492,6 +494,23 @@ func TestWithoutADSNNothingIsInstalled(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "no DSN") {
 		t.Errorf("logs: %s", logs)
+	}
+}
+
+func TestWithoutADSNABadSettingStillFails(t *testing.T) {
+	t.Setenv("BATON_DSN", "")
+	captureLogs(t)
+	for name, c := range map[string]struct {
+		server *mcp.Server
+		cfg    Config
+	}{
+		"no server":            {nil, Config{}},
+		"bad value":            {newVectorServer(), Config{ResultCapture: "none"}},
+		"bad report tool name": {newVectorServer(), Config{ReportMode: "on", AnnotationToolName: "not a name"}},
+	} {
+		if _, err := Install(c.server, c.cfg); err == nil {
+			t.Errorf("%s: installed with no error", name)
+		}
 	}
 }
 

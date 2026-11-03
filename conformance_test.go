@@ -11,7 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -98,7 +97,7 @@ func identifiedScenario(t *testing.T) []Event {
 	mem := &memorySink{}
 	installAs(t, server, Config{
 		ConsentToken: "ct_spec_vectors",
-		ResolvePrincipal: func(context.Context, *auth.TokenInfo) (*Principal, error) {
+		ResolvePrincipal: func(context.Context, Caller) (*Principal, error) {
 			return &Principal{ID: "user-123", DisplayName: "Jane", Organization: &Organization{ID: "org-456", DisplayName: "Acme"}}, nil
 		},
 	}, "spec-vectors", func() sink { return mem })

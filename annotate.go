@@ -78,6 +78,10 @@ func (b *installed) emitAnnotation(ctx context.Context, r *mcp.CallToolRequest, 
 	if extra, ok := jsonValue(args.Context).(map[string]any); ok && len(extra) > 0 {
 		payload.Context, _ = b.scrubValue(extra).(map[string]any)
 	}
+	if b.cfg.ResolvePrincipal != nil {
+		// The hook sees every other call without user_goal too.
+		b.stripGoalParams(r, nil)
+	}
 	b.emit(b.newCallContext(ctx, r), "annotation", payload)
 }
 

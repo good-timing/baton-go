@@ -9,7 +9,10 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
@@ -342,9 +345,9 @@ func TestUnknownTool(t *testing.T) {
 
 func TestResolverFailureNeverBreaksTheCall(t *testing.T) {
 	for name, hook := range map[string]ResolvePrincipal{
-		"error": func(context.Context, *auth.TokenInfo) (*Principal, error) { return nil, errors.New("down") },
-		"panic": func(context.Context, *auth.TokenInfo) (*Principal, error) { panic("boom") },
-		"blank": func(context.Context, *auth.TokenInfo) (*Principal, error) {
+		"error": func(context.Context, Caller) (*Principal, error) { return nil, errors.New("down") },
+		"panic": func(context.Context, Caller) (*Principal, error) { panic("boom") },
+		"blank": func(context.Context, Caller) (*Principal, error) {
 			return &Principal{ID: " \u00a0\u2003"}, nil
 		},
 	} {
@@ -358,6 +361,215 @@ func TestResolverFailureNeverBreaksTheCall(t *testing.T) {
 				t.Errorf("start = %+v", start)
 			}
 		})
+	}
+}
+
+func TestTheResolverSeesTheRequest(t *testing.T) {
+	var got Caller
+	hook := func(_ context.Context, c Caller) (*Principal, error) { got = c; return nil, nil }
+	server, _ := installWithSink(t, Config{ResolvePrincipal: hook}, addLookup)
+	cs := connectOver(t, &mcp.StreamableClientTransport{Endpoint: serveHTTP(t, server, false, nil)})
+	if _, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "lookup", Arguments: map[string]any{"name": "a", "user_goal": "1: find a"}, Meta: mcp.Meta{"trace": "t1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got.ToolName != "lookup" || !reflect.DeepEqual(got.Arguments, map[string]any{"name": "a"}) ||
+		got.Meta["trace"] != "t1" || got.Header.Get("Content-Type") == "" || got.Token != nil {
+		t.Errorf("caller = %+v", got)
+	}
+}
+
+func TestOnlyTimedOutResolversCountTowardTheCeiling(t *testing.T) {
+	// Resolvers another test gave up on count too; wait for them to end.
+	for deadline := time.Now().Add(5 * time.Second); stuckHooks.Load() > 0; {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d resolvers from other tests are still stuck", stuckHooks.Load())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	logs := captureLogs(t)
+	var called atomic.Int64
+	release := make(chan struct{})
+	var once sync.Once
+	stop := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(stop)
+	var arrived sync.WaitGroup
+	arrived.Add(hookCeiling + 6)
+	var phase atomic.Int32 // 0 all at once, 1 stuck, 2 plain
+	hook := func(context.Context, Caller) (*Principal, error) {
+		called.Add(1)
+		switch phase.Load() {
+		case 0:
+			arrived.Done()
+			arrived.Wait() // every call is in its hook at once
+		case 1:
+			<-release
+		}
+		return &Principal{ID: "u"}, nil
+	}
+	server, sink := installWithSink(t, Config{ResolvePrincipal: hook}, addLookup)
+	cs := connect(t, server)
+	var calls sync.WaitGroup
+	for range hookCeiling + 6 {
+		calls.Go(func() { call(t, cs, "lookup", map[string]any{"name": "a"}) })
+	}
+	calls.Wait()
+	for _, e := range ofType(sink.all(), "tool_call_start") {
+		if e.Principal == nil {
+			t.Fatalf("%d hooks at once, healthy, and one call lost its principal", hookCeiling+6)
+		}
+	}
+
+	phase.Store(1)
+	hookTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { hookTimeout = 5 * time.Second })
+	called.Store(0)
+	for range hookCeiling + 2 {
+		call(t, cs, "lookup", map[string]any{"name": "a"})
+	}
+	for deadline := time.Now().Add(time.Second); called.Load() < hookCeiling && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
+	if n := called.Load(); n != hookCeiling || strings.Count(logs.String(), "not called until one ends") != 1 {
+		t.Errorf("resolver called %d times, want %d, and one warning:\n%s", n, hookCeiling, logs)
+	}
+
+	// Once they end, the resolver is called again.
+	phase.Store(2)
+	stop()
+	hookTimeout = 5 * time.Second
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		call(t, cs, "lookup", map[string]any{"name": "a"})
+		if starts := ofType(sink.all(), "tool_call_start"); starts[len(starts)-1].Principal != nil {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Error("the resolver was not called again after the timed-out ones ended")
+}
+
+func TestTheResolverGetsCopies(t *testing.T) {
+	var got []Caller
+	hook := func(_ context.Context, c Caller) (*Principal, error) {
+		got = append(got, c)
+		if c.Header != nil {
+			c.Header.Set("User-Agent", "changed by the hook")
+		}
+		return nil, nil
+	}
+	server, sink := installWithSink(t, Config{ResolvePrincipal: hook, ReportMode: "on"}, addLookup)
+	cs := connectOver(t, &mcp.StreamableClientTransport{Endpoint: serveHTTP(t, server, false, nil)})
+	call(t, cs, "lookup", map[string]any{"name": "a"})
+	call(t, cs, slugAnnotateName("spec-vector-generator"), map[string]any{"user_goal": "1: g", "tool_name": "lookup", "what_happened": "w"})
+	if raw, _ := json.Marshal(ofType(sink.all(), "tool_call_start")[0].ClientObserved); strings.Contains(string(raw), "changed by the hook") {
+		t.Errorf("client_observed took the hook's edit: %s", raw)
+	}
+	if len(got) != 2 || got[1].Arguments["user_goal"] != nil || got[1].Arguments["what_happened"] != "w" {
+		t.Errorf("callers = %+v", got)
+	}
+}
+
+func TestTheResolversTokenIsACopy(t *testing.T) {
+	type claims struct{ Role string }
+	token := &auth.TokenInfo{Scopes: []string{"read"}, Extra: map[string]any{"sub": "u-1", "claims": &claims{"admin"}}}
+	c := callerOf(&mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "lookup"}}, nil, token, nil)
+	if _, typed := c.Token.Extra["claims"].(*claims); !typed {
+		t.Errorf("a claim lost its type: %T", c.Token.Extra["claims"])
+	}
+	c.Token.Extra["sub"], c.Token.Scopes[0] = "changed", "changed"
+	if token.Extra["sub"] != "u-1" || token.Scopes[0] != "read" {
+		t.Errorf("the hook's edit reached the request's token: %+v", token)
+	}
+}
+
+func TestAResolverThatStopsForItsContextIsATimeout(t *testing.T) {
+	logs := captureLogs(t)
+	hookTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { hookTimeout = 5 * time.Second })
+	hook := func(ctx context.Context, _ Caller) (*Principal, error) { <-ctx.Done(); return nil, ctx.Err() }
+	server, _ := installWithSink(t, Config{ResolvePrincipal: hook}, addLookup)
+	cs := connect(t, server)
+	for range 3 {
+		call(t, cs, "lookup", map[string]any{"name": "a"})
+	}
+	if strings.Contains(logs.String(), "ResolvePrincipal failed") || strings.Count(logs.String(), "took longer than") != 1 {
+		t.Errorf("want one timeout warning and no failure:\n%s", logs)
+	}
+}
+
+func TestACancelledRequestDoesNotCallTheResolver(t *testing.T) {
+	logs := captureLogs(t)
+	called := make(chan struct{}, 1)
+	b := &installed{cfg: Config{ResolvePrincipal: func(context.Context, Caller) (*Principal, error) { called <- struct{}{}; return nil, nil }}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	b.resolveCaller(ctx, func() Caller { return Caller{} })
+	select {
+	case <-called:
+		t.Error("the resolver was called for a cancelled request")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if strings.Contains(logs.String(), "took longer") {
+		t.Errorf("a cancel was logged as slow:\n%s", logs)
+	}
+}
+
+func TestTheResolverOnARequestThatIsNotACall(t *testing.T) {
+	var got []Caller
+	hook := func(_ context.Context, c Caller) (*Principal, error) { got = append(got, c); return nil, nil }
+	server, _ := installWithSink(t, Config{ResolvePrincipal: hook}, addLookup)
+	if _, err := connect(t, server).ListTools(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ToolName != "" || got[0].Arguments == nil || len(got[0].Arguments) != 0 || got[0].Header != nil {
+		t.Errorf("callers = %+v", got)
+	}
+}
+
+func TestTheOAuthHelpers(t *testing.T) {
+	token := func(extra map[string]any) Caller {
+		return Caller{Token: &auth.TokenInfo{UserID: "client-app", Extra: extra}}
+	}
+	for name, c := range map[string]struct {
+		hook   ResolvePrincipal
+		caller Caller
+		want   *Principal
+	}{
+		"sub":           {PrincipalFromOAuthSub, token(map[string]any{"sub": "u-1"}), &Principal{ID: "u-1"}},
+		"no sub":        {PrincipalFromOAuthSub, token(map[string]any{"sub": " "}), nil},
+		"no token":      {PrincipalFromOAuthSub, Caller{}, nil},
+		"email":         {PrincipalFromOAuthEmail, token(map[string]any{"email": "jane@acme.com"}), &Principal{ID: "jane@acme.com", DisplayName: "jane"}},
+		"no local part": {PrincipalFromOAuthEmail, token(map[string]any{"email": "@acme.com"}), &Principal{ID: "@acme.com"}},
+		"not a string":  {PrincipalFromOAuthEmail, token(map[string]any{"email": 7}), nil},
+	} {
+		if p, err := c.hook(context.Background(), c.caller); err != nil || !reflect.DeepEqual(p, c.want) {
+			t.Errorf("%s: %+v, %v; want %+v", name, p, err, c.want)
+		}
+	}
+}
+
+func TestASlowResolverIsCutOff(t *testing.T) {
+	logs := captureLogs(t)
+	hookTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { hookTimeout = 5 * time.Second })
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	slow := func(context.Context, Caller) (*Principal, error) {
+		<-release
+		return &Principal{ID: "late"}, nil
+	}
+	server, sink := installWithSink(t, Config{ResolvePrincipal: slow}, addLookup)
+	began := time.Now()
+	call(t, connect(t, server), "lookup", map[string]any{"name": "a"})
+	if took := time.Since(began); took > time.Second {
+		t.Errorf("the call took %v; a slow resolver must not hold it", took)
+	}
+	if start := ofType(sink.all(), "tool_call_start"); len(start) != 1 || start[0].Principal != nil {
+		t.Errorf("start = %+v", start)
+	}
+	if !strings.Contains(logs.String(), "took longer than") {
+		t.Errorf("no warning logged:\n%s", logs)
 	}
 }
 

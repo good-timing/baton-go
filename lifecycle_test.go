@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -144,7 +143,7 @@ func TestUnderResultCaptureOffAFailedRequestKeepsItsMessage(t *testing.T) {
 // start and the terminal event.
 func TestALifecycleRequestCarriesThePrincipal(t *testing.T) {
 	calls := 0
-	server, sink := installWithSink(t, Config{ResolvePrincipal: func(context.Context, *auth.TokenInfo) (*Principal, error) {
+	server, sink := installWithSink(t, Config{ResolvePrincipal: func(context.Context, Caller) (*Principal, error) {
 		calls++
 		return &Principal{ID: "u1"}, nil
 	}}, addPromptsAndResources)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"reflect"
 	"slices"
@@ -248,7 +249,9 @@ func (b *installed) newCallContext(ctx context.Context, r mcp.Request) callConte
 	cc := callContext{
 		session: b.sessions.resolve(session, header),
 	}
-	cc.principal, cc.org = resolveCaller(ctx, b.cfg.ResolvePrincipal, token)
+	if b.cfg.ResolvePrincipal != nil {
+		cc.principal, cc.org = b.resolveCaller(ctx, func() Caller { return callerOf(r, header, token, meta) })
+	}
 	cc.client = b.observeClient(meta, session, header)
 	if len(meta) > 0 {
 		meta, _ := jsonValue(map[string]any(meta)).(map[string]any)
@@ -256,6 +259,30 @@ func (b *installed) newCallContext(ctx context.Context, r mcp.Request) callConte
 		cc.runtimeMeta, _ = b.scrubOrNil(roundMetaCoordinates(meta), "runtime_meta").(map[string]any)
 	}
 	return cc
+}
+
+// callerOf copies what the hook may read, so a hook still running after its
+// timeout does not share it with the request (TestTheResolverGetsCopies,
+// TestTheResolversTokenIsACopy). The token's claims keep their types, so a
+// nested claim is shared.
+func callerOf(r mcp.Request, header http.Header, token *auth.TokenInfo, meta mcp.Meta) Caller {
+	c := Caller{Header: header.Clone(), Arguments: map[string]any{}}
+	if token != nil {
+		copied := *token
+		copied.Scopes = slices.Clone(token.Scopes)
+		copied.Extra = maps.Clone(token.Extra)
+		c.Token = &copied
+	}
+	if len(meta) > 0 {
+		c.Meta, _ = jsonValue(map[string]any(meta)).(map[string]any)
+	}
+	if call, ok := r.(*mcp.CallToolRequest); ok && call.Params != nil {
+		c.ToolName = call.Params.Name
+		if args, _ := jsonValue(call.Params.Arguments).(map[string]any); args != nil {
+			c.Arguments = args
+		}
+	}
+	return c
 }
 
 func (b *installed) toolCall(ctx context.Context, next mcp.MethodHandler, method string, r *mcp.CallToolRequest) (mcp.Result, error) {

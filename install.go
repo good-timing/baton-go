@@ -93,6 +93,8 @@ type installed struct {
 	clashWarned         sync.Once
 	scrubPanicLogged    sync.Map
 	paramsShapeWarned   sync.Once
+	hooksStuckWarned    sync.Once
+	hookSlowWarned      sync.Once
 }
 
 // Install adds Baton to server. Call it after the vendor's own AddTool lines;
@@ -173,6 +175,7 @@ func configure(cfg Config) (*installed, error) {
 		oneOf("ResultCapture", cfg.ResultCapture, "full", "off"),
 		oneOf("IntentParam", cfg.IntentParam, "required", "optional"),
 		oneOf("ReportMode", cfg.ReportMode, "on", "off"),
+		validToolName("AnnotationToolName", cfg.AnnotationToolName),
 	); err != nil {
 		return nil, err
 	}
@@ -202,6 +205,15 @@ func configure(cfg Config) (*installed, error) {
 // and renders the report pointer with them. The names must not depend on
 // any session: a stateless server lists tools in one request and calls them
 // in another, maybe in another process.
+// validToolName checks a name the vendor set; "" is unset
+// (TestWithoutADSNABadSettingStillFails).
+func validToolName(setting, name string) error {
+	if name != "" && !toolNamePattern.MatchString(name) {
+		return fmt.Errorf("baton: %s %q must match %s", setting, name, toolNamePattern)
+	}
+	return nil
+}
+
 func (b *installed) nameTheAnnotateTool() error {
 	b.displayName = cmp.Or(b.cfg.VendorDisplayName, b.server.name, b.vendorID)
 	if b.cfg.ReportMode != "on" {
