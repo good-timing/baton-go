@@ -19,6 +19,22 @@
   error,** as it is with a DSN, and as in `baton-sdk`. Before, it was let
   through and Baton installed nothing.
 
+- **Close counts the batch it gave up on before it returns** (SPEC §11.2
+  rule 8). 100 ms before the end of its budget (or half the budget, when
+  that is shorter), close cancels the send and waits the rest of the budget
+  for it to end, then counts what the collector has not answered. `Close`
+  still returns within its budget. Before, close returned without waiting
+  and the batch was counted only when its request ended, so a process that
+  exited right after `Close` counted nothing for it. An answer that arrives
+  after close counted changes no count. The close warning, now "closed with
+  events not delivered", also gives `refused` and `encode_failed` counts.
+- **Of several refused results for one event, the last code counts** (SPEC
+  §2.5), as in `baton-sdk`. Before, the first one counted.
+- **An event that close finds already measured as too big is counted
+  `refused`, and one that could not be encoded `encode_failed`** (SPEC
+  §2.5), not `unsent_at_close`. An event close finds not yet measured is
+  still `unsent_at_close`.
+
 ## 0.1.5
 
 - **Events are sent in batches** (SPEC §2.5), to `POST /v0/events/batch`,

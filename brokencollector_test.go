@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -19,11 +20,12 @@ import (
 // where python3 is missing, which the collector needs.
 
 type collectorScenario struct {
-	Name    string `json:"name"`
-	Mode    string `json:"mode"`
-	DelayMS int    `json:"delay_ms"`
-	Events  int    `json:"events"`
-	Expect  struct {
+	Name     string          `json:"name"`
+	Mode     string          `json:"mode"`
+	DelayMS  int             `json:"delay_ms"`
+	Events   int             `json:"events"`
+	Settings json.RawMessage `json:"settings"`
+	Expect   struct {
 		Accepted *int `json:"accepted"`
 		Dropped  *int `json:"dropped"`
 		Reports  *int `json:"reports"`
@@ -109,7 +111,8 @@ func TestTheSinkKeepsItsPromisesAgainstABrokenCollector(t *testing.T) {
 			logs := captureLogs(t)
 			url := startCollector(t, sc)
 			s := stopsWithTheTest(t, newHTTPSink(url, testKey))
-			spec.Settings.apply(s)
+			settings := spec.Settings.with(t, sc.Settings)
+			settings.apply(s)
 
 			for n := 1; n <= sc.Events; n++ {
 				started := time.Now()
@@ -127,13 +130,17 @@ func TestTheSinkKeepsItsPromisesAgainstABrokenCollector(t *testing.T) {
 			}
 			started := time.Now()
 			s.close(context.Background())
-			if took := time.Since(started); took > ms(spec.Settings.ShutdownBudgetMS+spec.Limits.CloseMarginMS) {
+			if took := time.Since(started); took > ms(settings.ShutdownBudgetMS+spec.Limits.CloseMarginMS) {
 				t.Errorf("close took %v", took)
 			}
-			select { // an event still being sent is counted when its send ends
+			counted := processDrops.totals()
+			select {
 			case <-s.done:
 			case <-time.After(5 * time.Second):
 				t.Fatal("the sink kept sending 5s after close")
+			}
+			if got := processDrops.totals(); !maps.Equal(got, counted) {
+				t.Errorf("counted %v after close returned, %v as it did", got, counted)
 			}
 
 			// A panic Baton recovered from is one that raised somewhere unseen.
@@ -146,7 +153,7 @@ func TestTheSinkKeepsItsPromisesAgainstABrokenCollector(t *testing.T) {
 				t.Error("the collector got no request")
 			}
 			dropped := 0
-			for _, n := range processDrops.totals() {
+			for _, n := range counted {
 				dropped += n
 			}
 			for _, n := range got {
@@ -161,7 +168,7 @@ func TestTheSinkKeepsItsPromisesAgainstABrokenCollector(t *testing.T) {
 				t.Errorf("accepted %v, want %d", got, *want)
 			}
 			if want := sc.Expect.Dropped; want != nil && dropped != *want {
-				t.Errorf("counted %v, want %d", processDrops.totals(), *want)
+				t.Errorf("counted %v, want %d", counted, *want)
 			}
 			if want := sc.Expect.Requests; want != nil && r.Requests != *want {
 				t.Errorf("%d requests, want %d", r.Requests, *want)

@@ -37,6 +37,11 @@ const (
 	reportEvery      = time.Minute
 )
 
+// closeGrace is how long before its deadline close cancels the send, so the
+// send can end and close counts only what the collector did not answer. It is
+// at most half the budget.
+const closeGrace = 100 * time.Millisecond
+
 const (
 	batchOpen  = `{"events":[`
 	batchClose = `]}`
@@ -59,6 +64,18 @@ type queued struct {
 // cost is the bytes q adds to a batch body, with its comma.
 func (q *queued) cost() int { return 1 + len(q.body) }
 
+// unsendable is why q can never be sent, or "" when it can or is not
+// measured yet; a caller tells those two apart.
+func (q *queued) unsendable() dropReason {
+	switch {
+	case q.encodeErr != nil:
+		return dropEncodeFailed
+	case batchFrame-1+q.cost() > batchBytes:
+		return dropRefused
+	}
+	return ""
+}
+
 // httpSink posts batches of events from a single goroutine, one request at a
 // time, so a slow or broken console never slows the vendor's tool calls.
 type httpSink struct {
@@ -70,6 +87,8 @@ type httpSink struct {
 	queue    []*queued
 	inFlight []*queued
 	closed   bool
+	// Close has counted what was queued and in flight; nothing counts it again.
+	closeCounted bool
 	// The queue's entries from absolute position head up to sized have their
 	// cost known, and sizedBytes is its sum, so a wake sizes only new events.
 	head, sized, sizedBytes int
@@ -271,17 +290,20 @@ func (s *httpSink) drain(force bool) time.Duration {
 		kept, failed := s.deliver(batch)
 
 		s.mu.Lock()
-		s.inFlight = nil
 		stopped := failed && s.ctx.Err() != nil
 		dropped := 0
-		if failed && !stopped {
-			// The batch taken, not kept: a report a 413 split left alone is kept.
-			dropped = s.putBack(kept, s.single || countEvents(batch) == 0)
+		switch {
+		case stopped && !s.closeCounted:
+			// Close counts it; it is not put back.
+			s.inFlight = kept
+		case !stopped:
+			s.inFlight = nil
+			if failed {
+				// The batch taken, not kept: a report a 413 split left alone is kept.
+				dropped = s.putBack(kept, s.single || countEvents(batch) == 0)
+			}
 		}
 		s.mu.Unlock()
-		if stopped {
-			processDrops.add(dropUnsentAtClose, countEvents(kept))
-		}
 		if dropped > 0 {
 			s.warnOverflow()
 		}
@@ -324,6 +346,9 @@ func (s *httpSink) sizeNew() {
 		return
 	}
 	for _, q := range todo {
+		if s.ctx.Err() != nil {
+			return
+		}
 		s.encode(q)
 	}
 	s.mu.Lock()
@@ -368,12 +393,12 @@ func (s *httpSink) nextBatch(force bool) ([]*queued, time.Duration) {
 take:
 	for len(s.queue) > 0 && len(batch) < places {
 		q := s.queue[0]
-		switch {
+		switch reason := q.unsendable(); {
 		case q.body == nil && q.encodeErr == nil:
 			break take // past the sized ones; the next batch takes it
-		case q.body == nil:
+		case reason == dropEncodeFailed:
 			unencodable = append(unencodable, q)
-		case batchFrame-1+q.cost() > batchBytes:
+		case reason == dropRefused:
 			oversize = append(oversize, q)
 		case size+q.cost() > room:
 			break take
@@ -390,14 +415,14 @@ take:
 		}
 	}
 	s.inFlight = batch
+	processDrops.add(dropEncodeFailed, len(unencodable))
+	processDrops.add(dropRefused, len(oversize))
 	s.mu.Unlock()
 	for _, q := range unencodable {
-		processDrops.add(dropEncodeFailed, 1)
 		slog.Warn("baton: an event could not be encoded and has been dropped; the events after it are still sent",
 			"event_type", q.EventType, "error_type", fmt.Sprintf("%T", q.encodeErr))
 	}
 	for _, q := range oversize {
-		processDrops.add(dropRefused, 1)
 		slog.Warn("baton: an event is over the 1 MiB batch cap, which a collector refuses, so it has been dropped unsent",
 			"event_type", q.EventType, "bytes", len(q.body))
 	}
@@ -476,7 +501,8 @@ func jsonObject(raw []byte) map[string]json.RawMessage {
 }
 
 // refusals reads a batch answer's results (SPEC §2.5): the error code of each
-// event_id with a "refused" result, which wins over any other result for it.
+// event_id with a "refused" result, which wins over any other result for it;
+// of several refused results, the last one's code.
 func refusals(answer []byte) map[string]string {
 	codes := map[string]string{}
 	var results []json.RawMessage
@@ -487,7 +513,7 @@ func refusals(answer []byte) map[string]string {
 		if id == "" || jsonString(r["status"]) != "refused" {
 			continue
 		}
-		codes[id] = cmp.Or(codes[id], jsonString(jsonObject(r["error"])["code"]))
+		codes[id] = jsonString(jsonObject(r["error"])["code"])
 	}
 	return codes
 }
@@ -521,7 +547,7 @@ func (s *httpSink) settle(batch []*queued, answer []byte) {
 			delivered = q
 		}
 	}
-	if refused > 0 {
+	if s.answered(batch, refused) && refused > 0 {
 		warnRefused(refused, "code", code)
 	}
 	if delivered != nil {
@@ -530,8 +556,21 @@ func (s *httpSink) settle(batch []*queued, answer []byte) {
 	}
 }
 
+// answered takes batch, which deliver answers in the order it was taken, out
+// of flight, and counts its refused events unless close has counted them.
+// It reports whether it counted.
+func (s *httpSink) answered(batch []*queued, refused int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inFlight = s.inFlight[min(len(batch), len(s.inFlight)):]
+	if s.closeCounted {
+		return false
+	}
+	processDrops.add(dropRefused, refused)
+	return true
+}
+
 func warnRefused(n int, args ...any) {
-	processDrops.add(dropRefused, n)
 	slog.Warn("baton: the collector REFUSED events; they have been dropped and are not sent again",
 		append([]any{"events", n}, args...)...)
 }
@@ -546,7 +585,7 @@ func (s *httpSink) refuse(batch []*queued, status int, answer []byte) {
 		s.reportsRefused = true
 		s.mu.Unlock()
 	}
-	if n := countEvents(batch); n > 0 {
+	if n := countEvents(batch); s.answered(batch, n) && n > 0 {
 		warnRefused(n, "status", status,
 			"body", strings.ToValidUTF8(string(answer[:min(len(answer), refusalBodyCap)]), "?"))
 	}
@@ -725,16 +764,18 @@ func (s *httpSink) withBudget(ctx context.Context) (context.Context, context.Can
 	return context.WithTimeout(ctx, s.budget)
 }
 
-// close sends what is queued until ctx's deadline, or for s.budget when ctx
-// has none. A second close waits for the first. When the console is failing,
-// or during a 429's wait, close does not try again.
+// close sends what is queued until closeGrace before ctx's deadline, or
+// before s.budget when ctx has none, then cancels the send and by the
+// deadline counts what is left; it returns just after that deadline at most. A second close waits for the first. When the
+// console is failing, or during a 429's wait, close does not try again.
 func (s *httpSink) close(ctx context.Context) {
-	unsent := 0
+	unsent, refused, encodeFailed := 0, 0, 0
 	// The warning is logged outside Do: a log handler that calls Close would
 	// otherwise wait on itself.
 	defer func() {
-		if unsent > 0 {
-			slog.Warn("baton: closed with events unsent", "unsent", unsent)
+		if unsent > 0 || refused > 0 || encodeFailed > 0 {
+			slog.Warn("baton: closed with events not delivered", "unsent", unsent,
+				"refused", refused, "encode_failed", encodeFailed)
 		}
 	}()
 	s.closeOnce.Do(func() {
@@ -746,19 +787,44 @@ func (s *httpSink) close(ctx context.Context) {
 		s.cancelReports()
 		ctx, cancel := s.withBudget(ctx)
 		defer cancel()
+		deadline, _ := ctx.Deadline()
+		grace := max(0, min(closeGrace, time.Until(deadline)/2))
+		sending, stopSending := context.WithDeadline(ctx, deadline.Add(-grace))
+		defer stopSending()
 		close(s.stop)
+		select {
+		case <-s.done:
+		case <-sending.Done():
+		}
+		s.cancel()
+		s.client.CloseIdleConnections()
 		select {
 		case <-s.done:
 		case <-ctx.Done():
 		}
-		s.cancel()
-		s.client.CloseIdleConnections()
 		s.mu.Lock()
-		unsent = len(s.queue)
-		inFlight := countEvents(s.inFlight)
-		s.mu.Unlock()
-		// Those being sent are counted by drain, when their send ends.
+		defer s.mu.Unlock()
+		s.closeCounted = true
+		unsent = countEvents(s.inFlight)
+		// SPEC §2.5: an event already measured unsendable is counted as such.
+		// One past sized may be being encoded right now, so it is not read.
+		for i, q := range s.queue {
+			var reason dropReason
+			if i < s.sized-s.head {
+				reason = q.unsendable()
+			}
+			switch reason {
+			case dropRefused:
+				refused++
+			case dropEncodeFailed:
+				encodeFailed++
+			default:
+				unsent++
+			}
+		}
+		processDrops.add(dropRefused, refused)
+		processDrops.add(dropEncodeFailed, encodeFailed)
 		processDrops.add(dropUnsentAtClose, unsent)
-		unsent += inFlight
+		s.queue, s.inFlight = nil, nil
 	})
 }

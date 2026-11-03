@@ -204,20 +204,29 @@ func TestAWholeBatchRefusalOfALoneReportDoesNotStopReports(t *testing.T) {
 }
 
 // A report refused for another reason is sent again after the next delivery.
+// Of several refusals of it, the last one's code counts.
 func TestAReportRefusedInABatchStopsReportsOnlyAsMalformed(t *testing.T) {
-	for code, reports := range map[string]int{"payload_malformed": 1, "quota_exhausted": 3} {
-		t.Run(code, func(t *testing.T) {
+	for _, c := range []struct {
+		codes   []string
+		reports int
+	}{
+		{[]string{"payload_malformed"}, 1},
+		{[]string{"quota_exhausted"}, 3},
+		{[]string{"payload_malformed", "quota_exhausted"}, 3},
+		{[]string{"quota_exhausted", "payload_malformed"}, 1},
+	} {
+		t.Run(strings.Join(c.codes, ","), func(t *testing.T) {
 			captureLogs(t)
 			s, console := reportSink(t, []int{400, 202, 202, 400, 202}, 0)
 			s.reportEvery = 0
 			console.refuse = func(e map[string]any) bool { return e["event_type"] == "client_report" }
-			console.refuseCode = code
+			console.refuseCodes = c.codes
 			sendAll(t, s, 1)
 			writeBesideAReport(t, s, console)
 			s.flushEvery = 0
 			sendAll(t, s, 2)
-			if console.count() != 5 || console.reportCount() != reports {
-				t.Errorf("%d requests, %d reports; want 5, %d", console.count(), console.reportCount(), reports)
+			if console.count() != 5 || console.reportCount() != c.reports {
+				t.Errorf("%d requests, %d reports; want 5, %d", console.count(), console.reportCount(), c.reports)
 			}
 		})
 	}

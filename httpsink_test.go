@@ -34,7 +34,7 @@ type fakeConsole struct {
 	reportStatus int
 	answer       func(n int) int
 	refuse       func(event map[string]any) bool
-	refuseCode   string
+	refuseCodes  []string
 	noBatch      int
 	maxEvents    int
 	retryAfter   string
@@ -50,7 +50,8 @@ const (
 
 // newFakeConsole answers the nth request carrying events (from 0) with
 // answer(n), or 2xx. A 2xx on the batch path answers each event accepted, or
-// refused with refuseCode, or payload_malformed, where refuse says so. A request that carries only client_reports
+// refused where refuse says so: one result for each of refuseCodes, or one
+// with payload_malformed. A request that carries only client_reports
 // is kept apart, in reports, and answered with reportStatus, or 2xx. The
 // batch path answers noBatch when set, and 413 to a body over the cap or to
 // more than maxEvents events when that is set. A 429 carries retryAfter.
@@ -128,11 +129,18 @@ func newFakeConsole(t *testing.T, answer func(n int) int) *fakeConsole {
 		var results []map[string]any
 		for _, e := range events {
 			result := map[string]any{"event_id": e["event_id"], "status": "accepted"}
-			if c.refuse != nil && c.refuse(e) {
-				result["status"] = "refused"
-				result["error"] = map[string]any{"code": cmp.Or(c.refuseCode, "payload_malformed"), "message": "refused"}
+			if c.refuse == nil || !c.refuse(e) {
+				results = append(results, result)
+				continue
 			}
-			results = append(results, result)
+			codes := c.refuseCodes
+			if codes == nil {
+				codes = []string{"payload_malformed"}
+			}
+			for _, code := range codes {
+				results = append(results, map[string]any{"event_id": e["event_id"], "status": "refused",
+					"error": map[string]any{"code": code, "message": "refused"}})
+			}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"results": results})
 	}))
@@ -171,8 +179,7 @@ func testEvent(n int) Event {
 }
 
 // stopsWithTheTest closes s at the test's end, if the test has not, and waits
-// for its sending goroutine: a send that close cut short is counted when it
-// returns, which must not land in the next test's counts.
+// for its sending goroutine, so it does not outlive the test.
 func stopsWithTheTest(t *testing.T, s *httpSink) *httpSink {
 	t.Helper()
 	t.Cleanup(func() {
@@ -283,7 +290,7 @@ func TestCloseUsesTheBudgetWithoutADeadline(t *testing.T) {
 	waitFor(t, "the send", func() bool { return console.count() == 1 })
 	start := time.Now()
 	s.close(nil) // a vendor may pass nil
-	if took := time.Since(start); took < s.budget || took > s.budget+300*time.Millisecond {
+	if took := time.Since(start); took < sendingTime(s.budget) || took > s.budget+300*time.Millisecond {
 		t.Errorf("close took %v", took)
 	}
 	select {
@@ -291,6 +298,12 @@ func TestCloseUsesTheBudgetWithoutADeadline(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		t.Error("the send still running was not stopped")
 	}
+}
+
+// sendingTime is how long close sends, with this budget, before it cancels a
+// send that has not ended; one that stops when cancelled lets close return then.
+func sendingTime(budget time.Duration) time.Duration {
+	return budget - min(closeGrace, budget/2)
 }
 
 func TestADeadlineLongerThanTheBudgetIsKept(t *testing.T) {
@@ -305,7 +318,7 @@ func TestADeadlineLongerThanTheBudgetIsKept(t *testing.T) {
 	defer cancel()
 	start := time.Now()
 	s.close(ctx)
-	if took := time.Since(start); took < 150*time.Millisecond {
+	if took := time.Since(start); took < sendingTime(200*time.Millisecond) {
 		t.Errorf("close took %v, before ctx's deadline", took)
 	}
 }
@@ -931,7 +944,7 @@ func TestCloseKeepsItsBudgetAgainstAHungCollector(t *testing.T) {
 	}
 	start := time.Now()
 	s.close(nil)
-	if took := time.Since(start); took < s.budget || took > s.budget+200*time.Millisecond {
+	if took := time.Since(start); took < sendingTime(s.budget) || took > s.budget+200*time.Millisecond {
 		t.Errorf("close took %v", took)
 	}
 	<-s.done

@@ -54,12 +54,7 @@ func TestShutdownScenarios(t *testing.T) {
 			if why, ok := shutdownNotRun[sc.Name]; ok {
 				t.Skip(why)
 			}
-			settings := spec.Settings
-			if sc.Settings != nil {
-				if err := json.Unmarshal(sc.Settings, &settings); err != nil {
-					t.Fatal(err)
-				}
-			}
+			settings := spec.Settings.with(t, sc.Settings)
 			closeLimit := ms(settings.ShutdownBudgetMS + spec.Limits.CloseMarginMS)
 			logs := captureLogs(t)
 			url := startCollector(t, collectorScenario{Mode: sc.Mode, DelayMS: sc.DelayMS})
@@ -148,13 +143,16 @@ func TestShutdownScenarios(t *testing.T) {
 			for running > 0 {
 				awaitClose()
 			}
-			select { // an event still being sent is counted when its send ends
+			counted := processDrops.totals()
+			select {
 			case <-sent.done:
 			case <-time.After(5 * time.Second):
 				t.Fatal("the sink kept sending 5s after close")
 			}
+			if got := processDrops.totals(); !maps.Equal(got, counted) {
+				t.Errorf("counted %v after close returned, %v as it did", got, counted)
+			}
 
-			counted := processDrops.totals()
 			for _, reason := range slices.Concat(slices.Collect(maps.Keys(counted)), slices.Collect(maps.Keys(sc.Expect.Dropped))) {
 				want, named := sc.Expect.Dropped[reason]
 				if n := counted[reason]; n < want || (!named && n > 0) {

@@ -32,6 +32,30 @@ func (c collectorSettings) apply(s *httpSink) {
 	}
 }
 
+// with is c with the keys raw holds replaced, leaving c as it was.
+func (c collectorSettings) with(t *testing.T, raw json.RawMessage) collectorSettings {
+	t.Helper()
+	if c.FlushIntervalMS != nil {
+		n := *c.FlushIntervalMS
+		c.FlushIntervalMS = &n
+	}
+	if raw != nil {
+		if err := json.Unmarshal(raw, &c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return c
+}
+
+func TestAScenarioSettingLeavesTheSharedOnesAlone(t *testing.T) {
+	interval := 5
+	shared := collectorSettings{RequestTimeoutMS: 200, FlushIntervalMS: &interval}
+	got := shared.with(t, json.RawMessage(`{"request_timeout_ms": 2000, "flush_interval_ms": 0}`))
+	if got.RequestTimeoutMS != 2000 || *got.FlushIntervalMS != 0 || shared.RequestTimeoutMS != 200 || *shared.FlushIntervalMS != 5 {
+		t.Errorf("got %d %d, shared %d %d", got.RequestTimeoutMS, *got.FlushIntervalMS, shared.RequestTimeoutMS, *shared.FlushIntervalMS)
+	}
+}
+
 // readScenarios reads collector/name into into, and skips the test where
 // python3, which the collector needs, is missing.
 func readScenarios(t *testing.T, name string, into any) {

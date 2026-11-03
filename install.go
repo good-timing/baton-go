@@ -58,8 +58,10 @@ type Handle struct {
 	b *installed
 }
 
-// Close sends what is still buffered until ctx's deadline, or for 3 seconds
-// when ctx has none, then stops. Events recorded after Close are dropped.
+// Close sends what is still buffered until shortly before ctx's deadline, or
+// before 3 seconds when ctx has none, then stops sending and counts what it
+// did not deliver, returning at about that deadline. Events recorded after
+// Close are dropped.
 func (h *Handle) Close(ctx context.Context) {
 	if h != nil && h.b != nil {
 		h.b.sink.close(ctx)
