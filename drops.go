@@ -62,19 +62,28 @@ func (d *dropCounts) totals() map[dropReason]int {
 // logRecovery is called on each delivery: it names what was lost before it,
 // the other half of a drop's own warning, which says only that loss started.
 func (d *dropCounts) logRecovery() {
-	d.mu.Lock()
-	if len(d.sinceDelivery) == 0 || time.Since(d.lastRecoveryLog) < recoveryLogEvery {
-		d.mu.Unlock()
+	lost := d.takeLostSinceDelivery()
+	if lost == nil {
 		return
 	}
-	lost := d.sinceDelivery
-	d.sinceDelivery = map[dropReason]int{}
-	d.lastRecoveryLog = time.Now()
-	d.mu.Unlock()
 	total, parts := 0, []string{}
 	for _, reason := range slices.Sorted(maps.Keys(lost)) {
 		total += lost[reason]
 		parts = append(parts, string(reason)+" "+strconv.Itoa(lost[reason]))
 	}
 	slog.Warn(fmt.Sprintf("baton: delivering again; %d event(s) lost before this: %s.", total, strings.Join(parts, ", ")))
+}
+
+// takeLostSinceDelivery returns the losses to log and starts a new count, or
+// nil when there are none or the last log was too recent.
+func (d *dropCounts) takeLostSinceDelivery() map[dropReason]int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.sinceDelivery) == 0 || time.Since(d.lastRecoveryLog) < recoveryLogEvery {
+		return nil
+	}
+	lost := d.sinceDelivery
+	d.sinceDelivery = map[dropReason]int{}
+	d.lastRecoveryLog = time.Now()
+	return lost
 }

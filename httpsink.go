@@ -97,6 +97,8 @@ type httpSink struct {
 
 	overflowWarned sync.Once
 	lateWarned     sync.Once
+	encodeWarned   sync.Once
+	oversizeWarned sync.Once
 
 	wake    chan struct{}
 	flushes chan chan struct{}
@@ -475,13 +477,19 @@ func (s *httpSink) takeBatch(force bool) (batch []*queued, wait time.Duration, a
 	if !taken {
 		return nil, wait, false
 	}
-	for _, q := range unencodable {
-		slog.Warn("baton: an event could not be encoded and has been dropped; the events after it are still sent",
-			"event_type", q.EventType, "error_type", fmt.Sprintf("%T", q.encodeErr))
+	if len(unencodable) > 0 {
+		q := unencodable[0]
+		s.encodeWarned.Do(func() {
+			slog.Warn("baton: an event could not be encoded and has been dropped; the events after it are still sent. Later ones are not logged",
+				"event_type", q.EventType, "error_type", fmt.Sprintf("%T", q.encodeErr))
+		})
 	}
-	for _, q := range oversize {
-		slog.Warn("baton: an event is over the 1 MiB batch cap, which a collector refuses, so it has been dropped unsent",
-			"event_type", q.EventType, "bytes", len(q.body))
+	if len(oversize) > 0 {
+		q := oversize[0]
+		s.oversizeWarned.Do(func() {
+			slog.Warn("baton: an event is over the 1 MiB batch cap, which a collector refuses, so it has been dropped unsent. Later ones are not logged",
+				"event_type", q.EventType, "bytes", len(q.body))
+		})
 	}
 	return batch, 0, batch == nil
 }

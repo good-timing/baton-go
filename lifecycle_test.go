@@ -131,10 +131,14 @@ func TestUnderResultCaptureOffAFailedRequestKeepsItsMessage(t *testing.T) {
 		if _, marked := got["result_capture"]; marked || got["error_body"] != "no such fleet" {
 			t.Errorf("%s: payload %v", capture, got)
 		}
-		for _, leg := range []string{"tool_list_error", "prompt_list_error", "prompt_get_error", "resource_list_error", "resource_read_error"} {
+		for _, leg := range []string{"prompt_list_error", "prompt_get_error", "resource_list_error", "resource_read_error"} {
 			if warned := strings.Count(logs.String(), leg); warned != map[string]int{"full": 0, "off": 1}[capture] {
 				t.Errorf("%s: %s warned %d times", capture, leg, warned)
 			}
+		}
+		// The SDK builds the tool list, so that leg cannot quote vendor data.
+		if strings.Contains(logs.String(), "tool_list_error") {
+			t.Errorf("%s: tool_list_error is named: %s", capture, logs)
 		}
 	}
 }

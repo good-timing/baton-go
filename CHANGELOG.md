@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **The HTTP sink warns once per sink about an event it cannot send,** not
+  once per event. This applies to an event that could not be encoded and to
+  one over the 1 MiB batch cap. A steady stream of them flooded the log
+  handler. Every such event is still counted as `encode_failed` or `refused`.
+- **The `ResultCapture: "off"` warning no longer names `tool_list_error`.**
+  The MCP SDK builds the tool list, so that message cannot quote your data.
+  The warning now names the same four legs as baton-sdk and baton-ts.
+
 ## 0.1.7
 
 - **A panic on the HTTP sink's sending goroutine no longer crashes the

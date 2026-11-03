@@ -662,6 +662,24 @@ func TestAnUnencodableEventIsLoggedWithoutItsText(t *testing.T) {
 	}
 }
 
+func TestEachKindOfUnsendableEventIsLoggedOncePerSink(t *testing.T) {
+	logs := captureLogs(t)
+	s := batchingSink(t, newFakeConsole(t, nil))
+	for n := range 3 {
+		s.write(Event{EventType: "tool_call_end", Payload: leakyValue{}})
+		s.write(bigEvent(n, batchBytes))
+		// One batch each, so a warning per batch would show.
+		s.flush(context.Background())
+	}
+	s.close(context.Background())
+	wantCounts(t, map[dropReason]int{dropEncodeFailed: 3, dropRefused: 3})
+	for _, warning := range []string{"could not be encoded", "over the 1 MiB"} {
+		if got := strings.Count(logs.String(), warning); got != 1 {
+			t.Errorf("%q logged %d times; logs: %s", warning, got, logs)
+		}
+	}
+}
+
 func TestAnEventThatPanicsWhenEncodedIsDropped(t *testing.T) {
 	console := newFakeConsole(t, nil)
 	logs := captureLogs(t)
