@@ -1,0 +1,40 @@
+# The tests against the newest go-sdk release, resolved when the job runs, so a
+# release that breaks baton-go fails here within a day. Gates nothing.
+name: go-sdk latest
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (go-sdk latest${{ matrix.protocol && format(', client protocol {0}', matrix.protocol) || '' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        protocol: ["", "2025-11-25"]
+    env:
+      BATON_TEST_MCP_PROTOCOL: ${{ matrix.protocol }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Resolve go-sdk@latest
+        run: |
+          v=$(go list -m -f '{{.Version}}' github.com/modelcontextprotocol/go-sdk@latest)
+          echo "go-sdk $v" | tee -a "$GITHUB_STEP_SUMMARY"
+          go get "github.com/modelcontextprotocol/go-sdk@$v"
+          go mod tidy
+          go version | tee -a "$GITHUB_STEP_SUMMARY"
+      - run: go vet ./...
+      - run: go test -race ./...
