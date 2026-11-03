@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - **Events can go to a file, to stderr, or to your own sink, without a
   collector.** `Config.Sink` takes a `baton.Sink`: `StdoutSink()` (stderr),

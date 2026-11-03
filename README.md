@@ -173,7 +173,10 @@ The switch belongs to whoever RUNS the server: your user for a server you distri
 None of it blocks the quickstart above.
 
 - No library API: only a go-sdk `*mcp.Server` is wrapped.
-- Only tools. Resources, prompts and `tools/list` requests emit no events.
+- One `Install` per server. A server built per request needs one shared
+  Baton, which is not here yet (see "Do not call `Install` per request").
+- Capture settings come from `Config` only; the Console's settings are not
+  read.
 
 ## Wire compatibility
 
