@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.7
 
 - **A panic on the HTTP sink's sending goroutine no longer crashes the
   process.** That sink stops sending, and logs one warning that gives the
