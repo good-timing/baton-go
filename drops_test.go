@@ -624,11 +624,8 @@ func TestAStoppedSinkCountsAMeasuredUnsendableEventAsSuch(t *testing.T) {
 	wantCounts(t, map[dropReason]int{dropRefused: 1, dropEncodeFailed: 1, dropWriteFailed: 2})
 }
 
-// A panic inside a section that holds s.mu still releases it, so the sink
-// stops sending rather than hang every write. The test overfills the queue
-// past the buffer's bound, so putting a failed batch back slices out of range.
-// That leaves the counts of what was held off by the update the panic cut
-// short, so only a later write's count is checked.
+// Overfilling the queue makes putBack slice out of range under s.mu. The cut
+// short update leaves the held counts off, so only a later write is checked.
 func TestAPanicHoldingTheLockIsRecovered(t *testing.T) {
 	captureLogs(t)
 	s, _ := stalledSink(t, &stalled{held: never, answer: networkError})
@@ -677,10 +674,10 @@ func TestAPanicOnTheSendingGoroutineCountsMeasuredEventsAsSuch(t *testing.T) {
 	wantCounts(t, map[dropReason]int{dropWriteFailed: 3, dropRefused: 1, dropEncodeFailed: 1})
 }
 
-func TestASinkThatStopsHoldingNothingLogsNothing(t *testing.T) {
+func TestASinkThatStopsHoldingNothingStillWarns(t *testing.T) {
 	logs := captureLogs(t)
 	(&httpSink{ctx: context.Background()}).die("x")
-	if n := warnings(logs); n != 0 {
+	if n := warnings(logs); n != 1 {
 		t.Errorf("logs: %s", logs)
 	}
 }

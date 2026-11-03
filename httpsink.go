@@ -289,14 +289,12 @@ func (s *httpSink) run() {
 // otherwise crash the vendor's process, and counts the events it held. The
 // panic's value is not logged: it may hold an event's content.
 func (s *httpSink) die(panicked any) {
-	s.mu.Lock()
-	s.dead = true
-	s.report = nil
-	lost, refused, encodeFailed := s.countHeld(dropWriteFailed)
-	s.mu.Unlock()
-	if lost+refused+encodeFailed == 0 {
-		return
-	}
+	var lost, refused, encodeFailed int
+	s.locked(func() {
+		s.dead = true
+		s.report = nil
+		lost, refused, encodeFailed = s.countHeld(dropWriteFailed)
+	})
 	defer func() { _ = recover() }() // the vendor's log handler may be what panicked
 	slog.Warn("baton: this sink's sending goroutine failed; it sends no more events, and those it held are counted",
 		"error_type", fmt.Sprintf("%T", panicked), "write_failed", lost, "refused", refused, "encode_failed", encodeFailed)
@@ -883,7 +881,7 @@ func (s *httpSink) countHeld(reason dropReason) (rest, refused, encodeFailed int
 	rest = countEvents(s.inFlight)
 	for i, q := range s.queue {
 		var measured dropReason
-		// Past sized nothing is measured yet, and close may be racing an encode.
+		// Past sized, sizeNew may be encoding it outside s.mu.
 		if i < s.sized-s.head {
 			measured = q.unsendable()
 		}
