@@ -534,7 +534,7 @@ func TestAPanicOnTheSendingGoroutineStopsSendingAndCountsTheRest(t *testing.T) {
 			}
 			s.mu.Unlock()
 			s.wake <- struct{}{}
-			waitDone(t, s)
+			waitDone(t, s.done)
 			s.write(testEvent(batchCap + 1))
 			started := time.Now()
 			s.close(context.Background())
@@ -551,10 +551,10 @@ func TestAPanicOnTheSendingGoroutineStopsSendingAndCountsTheRest(t *testing.T) {
 	}
 }
 
-func waitDone(t *testing.T, s *httpSink) {
+func waitDone(t *testing.T, done <-chan struct{}) {
 	t.Helper()
 	select {
-	case <-s.done:
+	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the sending goroutine is still running")
 	}
@@ -589,7 +589,7 @@ func TestALogHandlerThatPanicsOnTheSendingGoroutineDoesNotCrash(t *testing.T) {
 	}
 	s.mu.Unlock()
 	s.wake <- struct{}{}
-	waitDone(t, s)
+	waitDone(t, s.done)
 	s.write(testEvent(batchCap + 1))
 	s.close(context.Background())
 	wantCounts(t, map[dropReason]int{dropRefused: batchCap, dropWriteFailed: 2})
@@ -637,7 +637,7 @@ func TestAPanicHoldingTheLockIsRecovered(t *testing.T) {
 	}
 	s.mu.Unlock()
 	s.wake <- struct{}{}
-	waitDone(t, s)
+	waitDone(t, s.done)
 	if !s.mu.TryLock() {
 		t.Fatal("s.mu is still held")
 	}
@@ -668,7 +668,7 @@ func TestAPanicOnTheSendingGoroutineCountsMeasuredEventsAsSuch(t *testing.T) {
 	s.push(Event{EventType: "tool_call_start", Payload: map[string]any{"bad": func() {}}})
 	s.mu.Unlock()
 	s.wake <- struct{}{}
-	waitDone(t, s)
+	waitDone(t, s.done)
 	s.write(testEvent(4))
 	s.close(context.Background())
 	wantCounts(t, map[dropReason]int{dropWriteFailed: 3, dropRefused: 1, dropEncodeFailed: 1})

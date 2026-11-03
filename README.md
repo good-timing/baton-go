@@ -59,9 +59,30 @@ Copy the DSN from **/account**. It packs four values: the collector to send to, 
 
 **If you distribute your server, put the DSN in your source.** A stdio server runs on your user's machine, spawned by their MCP client, which passes it a fixed allowlist of environment variables (six names on macOS and Linux) plus whatever that user wrote in their own client config. Nothing from your `.env` is in either list. For a hosted server, set `BATON_DSN` and pass `baton.Config{}`. An explicit `DSN` wins over `BATON_DSN`.
 
-**With no DSN, Baton installs nothing.** `Install` logs one warning and returns a handle whose `Close` does nothing. Your server starts as usual. A config value that is not valid, such as `ResultCapture: "none"`, is still an error.
+**With no DSN, Baton installs nothing,** unless you set `Sink` or `VendorID` (see [Events to a file or stderr](#events-to-a-file-or-stderr)). `Install` logs one warning and returns a handle whose `Close` does nothing. Your server starts as usual. A config value that is not valid, such as `ResultCapture: "none"`, is still an error.
 
 **Call `Close` when your server stops.** Events are sent in the background, so a slow or broken collector never slows a tool call. They are sent in batches, so an event can reach the console up to 5 seconds after it was recorded. `Close(ctx)` sends what is still buffered and returns when it is done. It stops sending shortly before `ctx`'s deadline, or before 3 seconds if `ctx` has none, so it can count what it did not deliver and return at about that time. It never returns an error. Events recorded after `Close` are dropped.
+
+## Events to a file or stderr
+
+Without a collector, send events to a `Sink` instead of a DSN. Each event is one line of JSON.
+
+```go
+handle, err := baton.Install(server, baton.Config{
+	Sink:     baton.FileSink("events.jsonl"),
+	VendorID: "acme",
+	TenantID: "ten_0123abcd", // optional; unset, it is VendorID
+})
+```
+
+- `baton.StdoutSink()` writes to **stderr**, because stdout carries the stdio transport. It is the sink when you set `VendorID` and no `Sink`.
+- `baton.FileSink(path)` appends to `path`. It creates the file on the first event, not before.
+- `baton.MultiSink(a, b)` writes every event to each sink.
+- Your own type works too: anything with `Write(ctx, []baton.Event) error` and `Close(ctx) error`.
+
+`VendorID` is required with a `Sink`. A `DSN` in `Config` together with `Sink`, `VendorID` or `TenantID` is an error, because both name where the events go. A `BATON_DSN` in the environment is ignored, with one warning.
+
+Baton calls a sink only from its own goroutine, never from a tool call, so a slow disk does not slow your server. It holds up to 1,000 events in front of the sink, and drops the oldest when that is full. A `Write` that returns an error or panics loses that batch. `Close` writes what is held within its deadline, then calls the sink's `Close` once. Baton counts every event it loses, and logs a warning, but it sends no loss report through a sink: there is no collector to read one.
 
 ## Stateless HTTP
 
@@ -143,7 +164,6 @@ None of it blocks the quickstart above.
 
 - No library API: only a go-sdk `*mcp.Server` is wrapped.
 - Only tools. Resources, prompts and `tools/list` requests emit no events.
-- No local mode, and no file or stderr output: events go to the collector the DSN names.
 
 ## Wire compatibility
 

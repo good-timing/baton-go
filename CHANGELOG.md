@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **Events can go to a file, to stderr, or to your own sink, without a
+  collector.** `Config.Sink` takes a `baton.Sink`: `StdoutSink()` (stderr),
+  `FileSink(path)`, `MultiSink(...)`, or any type with `Write(ctx,
+  []Event) error` and `Close(ctx) error`. `Config.VendorID` names the server
+  then and is required; `Config.TenantID` is optional and defaults to
+  `VendorID`, with no environment variable read. Baton calls the sink only
+  from its own sending goroutine, behind the same 1,000-event queue as the
+  HTTP sink, and counts what is lost: `buffer_full`, `write_failed` for a
+  `Write` that fails or panics, `after_close`, and `unsent_at_close`. No
+  `client_report` is sent through a sink.
+- **As in the Python and TypeScript SDKs, `VendorID` with no `Sink` writes
+  to stderr.** With no DSN, no `Sink`, no `VendorID` and no `TenantID`,
+  `Install` still adds nothing.
+- **As in the Python and TypeScript SDKs, only a DSN written in `Config`
+  conflicts with `Sink`, `VendorID` or `TenantID`.** Setting both is an
+  error. A `BATON_DSN` in the environment loses to them, with one warning,
+  so a stale variable cannot stop the server from starting.
 - **The "collector REFUSED events" warning is logged at most once a minute
   per kind** (an HTTP status, or a refusal code), as in baton-ts. baton-sdk
   keeps the same one-minute limit, but per HTTP status only. The next warning

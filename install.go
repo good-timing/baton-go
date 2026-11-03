@@ -28,9 +28,17 @@ const defaultConsentToken = "customer-consented"
 
 type Config struct {
 	// DSN is the value from /account, and names the server. Empty means the
-	// BATON_DSN environment variable; with neither, Install adds nothing and
-	// records nothing.
-	DSN               string
+	// BATON_DSN environment variable, unless Sink, VendorID or TenantID is
+	// set. With none of these, Install adds nothing and records nothing.
+	DSN string
+	// Sink, without a DSN, is where events go instead of a collector. Empty
+	// with VendorID set means StdoutSink. Give each Install its own Sink:
+	// each Handle.Close closes its Sink.
+	Sink Sink
+	// VendorID names the server when there is no DSN, and is required then.
+	VendorID string
+	// TenantID labels events written without a DSN. Empty means VendorID.
+	TenantID          string
 	VendorDisplayName string
 	ConsentToken      string
 	// ResultCapture is "full" (default) or "off", which withholds results
@@ -116,9 +124,17 @@ func Install(server *mcp.Server, cfg Config) (*Handle, error) {
 	if err != nil {
 		return nil, err
 	}
+	local := cfg.Sink != nil || cfg.VendorID != "" || cfg.TenantID != ""
+	if cfg.DSN != "" && local {
+		return nil, errors.New("baton: Config has a DSN and also Sink, VendorID or TenantID; " +
+			"a DSN names the server and where its events go, so set one or the other")
+	}
+	if local {
+		return b.installLocally(server, cfg)
+	}
 	raw := cmp.Or(cfg.DSN, os.Getenv("BATON_DSN"))
 	if raw == "" {
-		slog.Warn("baton: no DSN (Config.DSN or BATON_DSN), so Baton is not installed and records nothing")
+		slog.Warn("baton: no DSN (Config.DSN or BATON_DSN) and no Sink or VendorID, so Baton is not installed and records nothing")
 		return &Handle{}, nil
 	}
 	d, err := parseDSN(raw)
@@ -127,6 +143,22 @@ func Install(server *mcp.Server, cfg Config) (*Handle, error) {
 	}
 	b.vendorID, b.tenantID = d.vendorID, d.tenantID
 	return b.install(server, func() sink { return newHTTPSink(d.origin, d.key) })
+}
+
+func (b *installed) installLocally(server *mcp.Server, cfg Config) (*Handle, error) {
+	if !vendorIDPattern.MatchString(cfg.VendorID) {
+		return nil, fmt.Errorf("baton: Config.VendorID is %q; without a DSN it is required and must match %s",
+			cfg.VendorID, vendorIDPattern)
+	}
+	if os.Getenv("BATON_DSN") != "" {
+		slog.Warn("baton: BATON_DSN is set but ignored, because Config sets Sink, VendorID or TenantID")
+	}
+	out := cfg.Sink
+	if out == nil {
+		out = StdoutSink()
+	}
+	b.vendorID, b.tenantID = cfg.VendorID, cmp.Or(cfg.TenantID, cfg.VendorID)
+	return b.install(server, func() sink { return newQueueSink(out) })
 }
 
 // install starts the sink last, after everything that can fail.

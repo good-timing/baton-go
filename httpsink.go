@@ -168,10 +168,7 @@ func (s *httpSink) write(e Event) {
 	dropped := !closed && !dead && s.push(e)
 	s.mu.Unlock()
 	if closed {
-		processDrops.add(dropAfterClose, 1)
-		s.lateWarned.Do(func() {
-			slog.Warn("baton: an event was recorded after Close and has been dropped; later ones are dropped silently")
-		})
+		dropAfterCloseOnce(&s.lateWarned)
 		return
 	}
 	if dead {
@@ -246,10 +243,19 @@ func (s *httpSink) popFront() *queued {
 	return q
 }
 
-func (s *httpSink) warnOverflow() {
-	s.overflowWarned.Do(func() {
+func (s *httpSink) warnOverflow() { warnOverflow(&s.overflowWarned) }
+
+func warnOverflow(once *sync.Once) {
+	once.Do(func() {
 		slog.Warn("baton: the event buffer is full; the oldest events are dropped. Further overflows are silent",
 			"cap", bufferCap)
+	})
+}
+
+func dropAfterCloseOnce(once *sync.Once) {
+	processDrops.add(dropAfterClose, 1)
+	once.Do(func() {
+		slog.Warn("baton: an event was recorded after Close and has been dropped; later ones are dropped silently")
 	})
 }
 
@@ -807,7 +813,7 @@ func retryAfter(header string) time.Duration {
 // sending goroutine has stopped, at ctx's deadline, or after s.budget when ctx
 // has none.
 func (s *httpSink) flush(ctx context.Context) {
-	ctx, cancel := s.withBudget(ctx)
+	ctx, cancel := withBudget(ctx, s.budget)
 	defer cancel()
 	flushed := make(chan struct{})
 	select {
@@ -822,16 +828,6 @@ func (s *httpSink) flush(ctx context.Context) {
 	case <-s.done:
 	case <-ctx.Done():
 	}
-}
-
-func (s *httpSink) withBudget(ctx context.Context) (context.Context, context.CancelFunc) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if _, ok := ctx.Deadline(); ok {
-		return ctx, func() {}
-	}
-	return context.WithTimeout(ctx, s.budget)
 }
 
 // close sends what is queued until closeGrace before ctx's deadline, or
@@ -858,7 +854,7 @@ func (s *httpSink) close(ctx context.Context) {
 		s.report = nil
 		s.mu.Unlock()
 		s.cancelReports()
-		ctx, cancel := s.withBudget(ctx)
+		ctx, cancel := withBudget(ctx, s.budget)
 		defer cancel()
 		deadline, _ := ctx.Deadline()
 		grace := max(0, min(closeGrace, time.Until(deadline)/2))
