@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.6
 
 - **`ResolvePrincipal` takes a `baton.Caller`,** as the hooks in `baton-sdk`
   and `baton-ts` take one context: the verified token, the HTTP headers,
