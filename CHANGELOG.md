@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+- **A panic on the HTTP sink's sending goroutine no longer crashes the
+  process.** That sink stops sending, and logs one warning that gives the
+  panic's type only. The events it held then are counted `write_failed`, or
+  `refused` or `encode_failed` when it had already found one could not be
+  sent, and every event recorded after it is counted `write_failed`. `Close`
+  and `Flush` return at once. If the panic came in the middle of updating its
+  queue, these counts may be off by the events that update touched.
+- **A flood of events that cannot be sent no longer crashes the process.**
+  The sending goroutine called itself once for each group of such events,
+  so a long enough flood overflowed its stack. It now loops.
+- **An event whose encoding stopped part way is dropped as `encode_failed`,**
+  not sent. Under `GODEBUG=panicnil=1`, `encoding/json` returns a cut-short
+  body with no error when a `MarshalJSON` panics with nil, and the collector
+  then refused the whole batch.
+- **A send that `Close` cancels no longer counts as a failure of the
+  console.** It could log "the console is failing" after `Close` returned.
+  And when `Close` cancelled a loss report being sent alone, that could pause
+  sending, so events `Close` still had time to send were counted unsent.
+
 ## 0.1.6
 
 - **`ResolvePrincipal` takes a `baton.Caller`,** as the hooks in `baton-sdk`

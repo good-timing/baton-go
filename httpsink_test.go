@@ -675,6 +675,19 @@ func TestAnEventThatPanicsWhenEncodedIsDropped(t *testing.T) {
 	}
 }
 
+type panicsNil struct{}
+
+func (panicsNil) MarshalJSON() ([]byte, error) { panic(nil) }
+
+func TestAnEventCutShortWhenEncodedIsAnError(t *testing.T) {
+	// Only under panicnil=1 does recover return nil, so encoding/json returns
+	// what it wrote and no error.
+	t.Setenv("GODEBUG", "panicnil=1")
+	if body, err := encodeEvent(Event{Payload: panicsNil{}}); err == nil {
+		t.Errorf("body %q and no error", body)
+	}
+}
+
 func (c *fakeConsole) batchSizes() []int {
 	c.mu.Lock()
 	defer c.mu.Unlock()

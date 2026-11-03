@@ -21,6 +21,7 @@ const (
 	dropEncodeFailed  dropReason = "encode_failed"
 	dropAfterClose    dropReason = "after_close"
 	dropUnsentAtClose dropReason = "unsent_at_close"
+	dropWriteFailed   dropReason = "write_failed"
 )
 
 // recoveryLogEvery is the least time between two "delivering again" warnings,
