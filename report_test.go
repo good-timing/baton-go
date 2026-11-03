@@ -196,8 +196,8 @@ func TestAWholeBatchRefusalOfALoneReportDoesNotStopReports(t *testing.T) {
 			if console.reportCount() != 2 || processDrops.totals()[dropRefused] != 2 {
 				t.Errorf("%d reports, counts %v; want 2 and 2 refused", console.reportCount(), processDrops.totals())
 			}
-			if n := strings.Count(logs.String(), "REFUSED"); n != 2 {
-				t.Errorf("%d refusals logged, want 2", n)
+			if n := strings.Count(logs.String(), "REFUSED"); n != 1 {
+				t.Errorf("%d refusals logged, want 1 a minute", n)
 			}
 		})
 	}
@@ -343,8 +343,8 @@ func TestACollectorWithoutTheBatchEndpointCanStillRefuseReports(t *testing.T) {
 	if console.reportCount() != 1 || processDrops.totals()[dropRefused] != 2 {
 		t.Errorf("%d reports, counts %v", console.reportCount(), processDrops.totals())
 	}
-	if n := strings.Count(logs.String(), "REFUSED"); n != 2 {
-		t.Errorf("%d refusals logged, want 2", n)
+	if n := strings.Count(logs.String(), "REFUSED"); n != 1 {
+		t.Errorf("%d refusals logged, want 1 a minute", n)
 	}
 }
 

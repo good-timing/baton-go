@@ -2,7 +2,6 @@ package baton
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -99,6 +98,7 @@ type httpSink struct {
 	lateWarned     sync.Once
 	encodeWarned   sync.Once
 	oversizeWarned sync.Once
+	refusals       refusalLog
 
 	wake    chan struct{}
 	flushes chan chan struct{}
@@ -587,7 +587,7 @@ func (s *httpSink) settle(batch []*queued, answer []byte) {
 		codes = refusals(answer)
 	}
 	var delivered *queued
-	refused, code := 0, ""
+	refused, byCode := 0, map[string]int{}
 	for _, q := range batch {
 		refusedCode, isRefused := codes[q.EventID]
 		switch {
@@ -603,13 +603,15 @@ func (s *httpSink) settle(batch []*queued, answer []byte) {
 			})
 		case isRefused:
 			refused++
-			code = cmp.Or(code, refusedCode)
+			byCode[refusedCode]++
 		case delivered == nil:
 			delivered = q
 		}
 	}
-	if s.answered(batch, refused) && refused > 0 {
-		warnRefused(refused, "code", code)
+	if s.answered(batch, refused) {
+		for code, n := range byCode {
+			s.warnRefused("code "+code, n, "code", code)
+		}
 	}
 	if delivered != nil {
 		processDrops.logRecovery()
@@ -631,11 +633,6 @@ func (s *httpSink) answered(batch []*queued, refused int) bool {
 	return true
 }
 
-func warnRefused(n int, args ...any) {
-	slog.Warn("baton: the collector REFUSED events; they have been dropped and are not sent again",
-		append([]any{"events", n}, args...)...)
-}
-
 // refuse drops a batch the collector refused as a whole.
 func (s *httpSink) refuse(batch []*queued, status int, answer []byte) {
 	alone := s.single && len(batch) == 1 && batch[0].isReport
@@ -645,7 +642,7 @@ func (s *httpSink) refuse(batch []*queued, status int, answer []byte) {
 		s.locked(func() { s.reportsRefused = true })
 	}
 	if n := countEvents(batch); s.answered(batch, n) && n > 0 {
-		warnRefused(n, "status", status,
+		s.warnRefused("status "+strconv.Itoa(status), n, "status", status,
 			"body", strings.ToValidUTF8(string(answer[:min(len(answer), refusalBodyCap)]), "?"))
 	}
 }
@@ -843,9 +840,12 @@ func (s *httpSink) withBudget(ctx context.Context) (context.Context, context.Can
 // console is failing, or during a 429's wait, close does not try again.
 func (s *httpSink) close(ctx context.Context) {
 	unsent, refused, encodeFailed := 0, 0, 0
-	// The warning is logged outside Do: a log handler that calls Close would
+	// The warnings are logged outside Do: a log handler that calls Close would
 	// otherwise wait on itself.
 	defer func() {
+		if n := s.refusals.unlogged(); n > 0 {
+			slog.Warn("baton: closed; more events were refused since the last such warning", "events", n)
+		}
 		if unsent > 0 || refused > 0 || encodeFailed > 0 {
 			slog.Warn("baton: closed with events not delivered", "unsent", unsent,
 				"refused", refused, "encode_failed", encodeFailed)

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **The "collector REFUSED events" warning is logged at most once a minute
+  per kind** (an HTTP status, or a refusal code), as in baton-ts. baton-sdk
+  keeps the same one-minute limit, but per HTTP status only. The next warning
+  says how many were refused in between, and close logs any still unlogged.
+  Every refused event is still counted `refused`.
 - **The HTTP sink warns once per sink about an event it cannot send,** not
   once per event. This applies to an event that could not be encoded and to
   one over the 1 MiB batch cap. A steady stream of them flooded the log
