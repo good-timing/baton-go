@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -48,6 +49,52 @@ func (b *installed) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 		}
 		return next(ctx, method, req)
 	}
+}
+
+type passageKey struct{}
+
+// passage is one tools/call's trip through the vendor's middleware.
+type passage struct {
+	reached atomic.Bool
+	// run is what Baton does with a call the vendor's middleware lets
+	// through, with the ctx that middleware passed on: serve calls the tool.
+	run func(ctx context.Context, serve func(context.Context) (mcp.Result, error)) (mcp.Result, error)
+}
+
+// innerMiddleware is the innermost middleware when Config.Middleware is set.
+// It runs a tools/call's passage once the vendor's middleware lets it
+// through, and keeps the handler below that middleware for Baton's listings.
+func (b *installed) innerMiddleware(next mcp.MethodHandler) mcp.MethodHandler {
+	b.belowVendor = next
+	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+		if method != "tools/call" {
+			return next(ctx, method, req)
+		}
+		p, ok := ctx.Value(passageKey{}).(*passage)
+		if !ok {
+			// The vendor's middleware passed on a new ctx; the request is the
+			// same one (TestAMiddlewareThatDropsTheCtxDoesNotMakeCallsRefused).
+			if v, found := b.passages.Load(req); found {
+				p, ok = v.(*passage), true
+			}
+		}
+		if !ok {
+			return next(ctx, method, req)
+		}
+		if p.reached.Swap(true) {
+			// A retry, or a second call the vendor's middleware made with this
+			// ctx: recorded once (TestAMiddlewareThatRetriesRecordsTheCallOnce).
+			return next(ctx, method, req)
+		}
+		return p.run(ctx, func(c context.Context) (mcp.Result, error) { return next(c, method, req) })
+	}
+}
+
+// startPassage gives r a passage that innerMiddleware can find by ctx or by
+// request; end forgets it.
+func (b *installed) startPassage(ctx context.Context, r *mcp.CallToolRequest, p *passage) (context.Context, func()) {
+	b.passages.Store(mcp.Request(r), p)
+	return context.WithValue(ctx, passageKey{}, p), func() { b.passages.Delete(mcp.Request(r)) }
 }
 
 // guard keeps a Baton failure out of the vendor's request (SPEC §11.2).
@@ -125,9 +172,14 @@ func (b *installed) addInstructions(instructions *string, l listing) {
 // Baton's additions. Listed per call rather than kept: tools can be added at
 // any time, and on a stateless server no earlier tools/list reached this
 // process. The request's own Extra goes along, so vendor middleware that
-// checks auth sees the same caller. ok is false when the listing failed,
-// which may be the vendor's auth refusing the caller; nothing is concluded from it.
+// checks auth sees the same caller. Config.Middleware is skipped: it would be
+// charged for a request the caller never sent. ok is false when the listing
+// failed, which may be the vendor's auth refusing the caller; nothing is
+// concluded from it.
 func (b *installed) vendorTools(ctx context.Context, next mcp.MethodHandler, req mcp.Request) (l listing, ok bool) {
+	if b.placesVendorMiddleware() && b.belowVendor != nil {
+		next = b.belowVendor
+	}
 	ss, _ := req.GetSession().(*mcp.ServerSession)
 	cursor := ""
 	for range 1000 {
@@ -293,10 +345,24 @@ func (b *installed) toolCall(ctx context.Context, next mcp.MethodHandler, method
 	guard("tools", func() { l, listed = b.vendorTools(ctx, next, r) })
 
 	if listed && r.Params.Name == b.annotateName && b.servesAnnotate(l) {
-		var res mcp.Result
-		guard("annotate", func() { res = b.answerAnnotate(ctx, r) })
-		if res != nil {
-			return res, nil
+		answer := func(ctx context.Context) (res *mcp.CallToolResult) {
+			guard("annotate", func() { res = b.answerAnnotate(ctx, r) })
+			return res
+		}
+		if !b.placesVendorMiddleware() {
+			if res := answer(ctx); res != nil {
+				return res, nil
+			}
+		} else {
+			// Through the vendor's middleware, which may check auth on it too.
+			passCtx, forget := b.startPassage(ctx, r, &passage{run: func(ctx context.Context, serve func(context.Context) (mcp.Result, error)) (mcp.Result, error) {
+				if res := answer(ctx); res != nil {
+					return res, nil
+				}
+				return serve(ctx)
+			}})
+			defer forget()
+			return emptyIfNil(next(passCtx, method, r))
 		}
 	}
 
@@ -309,33 +375,66 @@ func (b *installed) toolCall(ctx context.Context, next mcp.MethodHandler, method
 	)
 	guard("user_goal", func() { params, goals = b.stripGoalParams(r, tool) })
 
-	res, err := b.around(ctx, r, "tool_call",
-		func(cc *callContext, resuming bool) {
-			cc.callID = uuid7()
-			if resuming {
-				return
-			}
-			if listed {
-				b.maybeSnapshot(l)
-			}
-			start := toolCallStart{
-				ToolName:     r.Params.Name,
-				Params:       b.scrubParams(params),
-				CallIntent:   b.scrubOptionalOrNil(goals[userGoalParam], userGoalParam),
-				CallExpected: b.scrubOptionalOrNil(goals[expectedResultParam], expectedResultParam),
-				CallWorkflow: b.scrubOptionalOrNil(goals[overallTaskParam], overallTaskParam),
-			}
-			if start.CallIntent != nil || start.CallExpected != nil || start.CallWorkflow != nil {
-				start.IntentSource = ptr(intentSourceParam)
-			}
-			b.emit(*cc, "tool_call_start", start)
-		},
-		func() (mcp.Result, error) { return next(ctx, method, r) },
-		func(cc callContext, res mcp.Result, err error, elapsed int64) {
-			b.emitOutcome(cc, r.Params.Name, known, tool != nil && tool.OutputSchema != nil, res, err, elapsed)
-		})
-	// go-sdk v1.7+ panics on a nil result under MCP 2026-07-28; its typed
-	// AddTool sends an empty one (TestAHandlerReturningNothingStillEnds).
+	sendStart := func(cc *callContext, resuming bool) {
+		cc.callID = uuid7()
+		if resuming {
+			return
+		}
+		if listed {
+			b.maybeSnapshot(l)
+		}
+		start := toolCallStart{
+			ToolName:     r.Params.Name,
+			Params:       b.scrubParams(params),
+			CallIntent:   b.scrubOptionalOrNil(goals[userGoalParam], userGoalParam),
+			CallExpected: b.scrubOptionalOrNil(goals[expectedResultParam], expectedResultParam),
+			CallWorkflow: b.scrubOptionalOrNil(goals[overallTaskParam], overallTaskParam),
+		}
+		if start.CallIntent != nil || start.CallExpected != nil || start.CallWorkflow != nil {
+			start.IntentSource = ptr(intentSourceParam)
+		}
+		b.emit(*cc, "tool_call_start", start)
+	}
+	sendEnd := func(kind *string) func(callContext, mcp.Result, error, int64) {
+		return func(cc callContext, res mcp.Result, err error, elapsed int64) {
+			b.emitOutcome(cc, r.Params.Name, known, tool != nil && tool.OutputSchema != nil, kind, res, err, elapsed)
+		}
+	}
+
+	var (
+		res mcp.Result
+		err error
+	)
+	if !b.placesVendorMiddleware() {
+		res, err = b.around(ctx, r, "tool_call", sendStart, func() (mcp.Result, error) { return next(ctx, method, r) }, sendEnd(nil))
+	} else {
+		// A call the vendor's middleware lets through is recorded inside it,
+		// with the ctx it passed on, so ResolvePrincipal sees what its auth
+		// set (TestResolvePrincipalSeesWhatTheVendorsMiddlewareSet). Here,
+		// only a call it stopped.
+		pass := &passage{run: func(ctx context.Context, serve func(context.Context) (mcp.Result, error)) (mcp.Result, error) {
+			return b.around(ctx, r, "tool_call", sendStart, func() (mcp.Result, error) { return serve(ctx) }, sendEnd(nil))
+		}}
+		passCtx, forget := b.startPassage(ctx, r, pass)
+		defer forget()
+		resuming := resumesAPause(r.GetParams())
+		began := time.Now()
+		res, err = next(passCtx, method, r)
+		elapsed := time.Since(began).Milliseconds()
+		if !pass.reached.Load() && !paused(res) {
+			guard("tool_call_refused", func() {
+				cc := b.newCallContext(ctx, r)
+				sendStart(&cc, resuming)
+				sendEnd(ptr("refused"))(cc, res, err, elapsed)
+			})
+		}
+	}
+	return emptyIfNil(res, err)
+}
+
+// emptyIfNil sends an empty result for a nil one: go-sdk v1.7+ panics on a nil
+// result under MCP 2026-07-28 (TestAHandlerReturningNothingStillEnds).
+func emptyIfNil(res mcp.Result, err error) (mcp.Result, error) {
 	if result, ok := res.(*mcp.CallToolResult); err == nil && (res == nil || ok && result == nil) {
 		res = &mcp.CallToolResult{Content: []mcp.Content{}}
 	}
@@ -386,9 +485,10 @@ func (b *installed) stripGoalParams(r *mcp.CallToolRequest, tool *mcp.Tool) (any
 	return jsonValue(r.Params.Arguments), goals
 }
 
-// emitOutcome sends the call's end or error. A failure is classified first,
-// then withheld in one place under ResultCapture "off" (SPEC §11.4.3).
-func (b *installed) emitOutcome(cc callContext, toolName string, known, checksOutput bool, res mcp.Result, err error, elapsed int64) {
+// emitOutcome sends the call's end or error. A failure is classified, kind
+// replaces the classification when set, and then it is withheld in one place
+// under ResultCapture "off" (SPEC §11.4.3).
+func (b *installed) emitOutcome(cc callContext, toolName string, known, checksOutput bool, kind *string, res mcp.Result, err error, elapsed int64) {
 	result, _ := res.(*mcp.CallToolResult)
 	failure := toolCallError{ToolName: toolName, DurationMS: elapsed}
 	var raised error
@@ -424,6 +524,9 @@ func (b *installed) emitOutcome(cc callContext, toolName string, known, checksOu
 	if raised != nil {
 		failure.ErrorType = errorType(raised)
 		failure.ErrorBody = b.errorBody(raised.Error())
+	}
+	if kind != nil {
+		failure.FailureKind = kind
 	}
 	// unknown_tool's message describes the request. go-sdk's argument message
 	// does too, but a tool can return the same words, so it is withheld.

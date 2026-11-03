@@ -55,6 +55,9 @@ type Config struct {
 	// NoScrub turns it off.
 	Scrubber         func(any) any
 	ResolvePrincipal ResolvePrincipal
+	// Middleware is the server's own receiving middleware, such as an auth
+	// check, added inside Baton's so a call it stops is named "refused".
+	Middleware []mcp.Middleware
 }
 
 // PublicError marks an error message as safe to send under ResultCapture
@@ -101,6 +104,8 @@ type installed struct {
 	listed              *lru[*mcp.Tool, *mcp.Tool]
 	sentSurfaces        *lru[string, struct{}]
 	lastSurface         lastSurface
+	belowVendor         mcp.MethodHandler
+	passages            sync.Map // mcp.Request → *passage
 	clashWarned         sync.Once
 	scrubPanicLogged    sync.Map
 	paramsShapeWarned   sync.Once
@@ -109,10 +114,21 @@ type installed struct {
 }
 
 // Install adds Baton to server. Call it after the vendor's own AddTool lines;
-// tools added later are covered too. Call it once per server: each Install
-// starts its own sender, which runs until Close. With BATON_DISABLED=1 in the
-// environment, Install adds nothing and checks nothing, not even server or cfg.
-func Install(server *mcp.Server, cfg Config) (*Handle, error) {
+// tools added later are covered too. Pass the server's own middleware in
+// Config.Middleware: middleware added after Install runs before Baton, so a
+// call it stops is not recorded. Install adds Config.Middleware even when it
+// adds nothing of Baton's or returns an error, so do not add it again. Call it
+// once per server: each Install starts its own sender, which runs until Close.
+// With BATON_DISABLED=1 in the environment, Install adds nothing else and
+// checks nothing, not even server or cfg.
+func Install(server *mcp.Server, cfg Config) (h *Handle, err error) {
+	// When Baton adds nothing, the vendor's middleware still runs: it may be
+	// their auth (TestTheVendorsMiddlewareRunsWhenBatonIsNotInstalled).
+	defer func() {
+		if server != nil && (h == nil || h.b == nil) {
+			addVendorMiddleware(server, cfg.Middleware)
+		}
+	}()
 	if captureDisabled() {
 		slog.Info("baton: BATON_DISABLED is set, so Baton is not installed and records nothing")
 		return &Handle{}, nil
@@ -175,8 +191,30 @@ func (b *installed) install(server *mcp.Server, openSink func() sink) (*Handle, 
 		return nil, err
 	}
 	b.sink = openSink()
-	server.AddReceivingMiddleware(b.middleware)
+	server.AddReceivingMiddleware(b.chain()...)
 	return &Handle{b: b}, nil
+}
+
+// chain puts the vendor's middleware between Baton's two, so a tools/call
+// that innerMiddleware never saw was stopped by the vendor's.
+func (b *installed) chain() []mcp.Middleware {
+	if !b.placesVendorMiddleware() {
+		return []mcp.Middleware{b.middleware}
+	}
+	return slices.Concat([]mcp.Middleware{b.middleware}, b.cfg.Middleware, []mcp.Middleware{b.innerMiddleware})
+}
+
+func (b *installed) placesVendorMiddleware() bool { return len(b.cfg.Middleware) > 0 }
+
+func addVendorMiddleware(server *mcp.Server, middleware []mcp.Middleware) {
+	server.AddReceivingMiddleware(slices.DeleteFunc(slices.Clone(middleware), func(m mcp.Middleware) bool { return m == nil })...)
+}
+
+func noNilMiddleware(cfg Config) error {
+	if slices.ContainsFunc(cfg.Middleware, func(m mcp.Middleware) bool { return m == nil }) {
+		return errors.New("baton: Config.Middleware holds a nil middleware")
+	}
+	return nil
 }
 
 // captureDisabled reads the off switch with baton-sdk's values. Install checks
@@ -211,6 +249,7 @@ func configure(cfg Config) (*installed, error) {
 		oneOf("IntentParam", cfg.IntentParam, "required", "optional"),
 		oneOf("ReportMode", cfg.ReportMode, "on", "off"),
 		validToolName(cfg),
+		noNilMiddleware(cfg),
 	); err != nil {
 		return nil, err
 	}

@@ -19,6 +19,20 @@
   conflicts with `Sink`, `VendorID` or `TenantID`.** Setting both is an
   error. A `BATON_DSN` in the environment loses to them, with one warning,
   so a stale variable cannot stop the server from starting.
+- **A tool call your own middleware stops with an error is named `refused`** (SPEC
+  §11.4.3), when you pass that middleware in the new `Config.Middleware`
+  instead of adding it with `AddReceivingMiddleware`. Under
+  `ResultCapture: "off"` its message and result are withheld, unless it is
+  a `*baton.PublicError`. A call that middleware lets through is recorded
+  with the `ctx` it passes on, so `ResolvePrincipal` sees what its auth
+  set, and with what your tool returned, before that middleware changes it.
+  Middleware you add yourself is not named, and middleware added after
+  `Install` runs before Baton, so a call it stops is not recorded at all;
+  the README and `Install`'s doc now say so. `tool_disabled` is never sent: go-sdk has no
+  disabled tools. A nil entry in `Config.Middleware` is a config error.
+  That middleware also checks calls to the annotation tool, does not see
+  the tool listings Baton makes for itself, and still runs when `Install`
+  adds nothing (`BATON_DISABLED`, no DSN, or an error).
 - **The "collector REFUSED events" warning is logged at most once a minute
   per kind** (an HTTP status, or a refusal code), as in baton-ts. baton-sdk
   keeps the same one-minute limit, but per HTTP status only. The next warning

@@ -150,7 +150,17 @@ If your users belong to your customers' companies, return the company too, so yo
 
 A call to a tool that does not exist never reaches a handler. Baton still records it, as `tool_call_error` with `failure_kind: "unknown_tool"`. To know a tool is missing, Baton lists your tools on each call; if that listing fails, the event has no `failure_kind`.
 
-For a tool made with `mcp.AddTool`, go-sdk checks the arguments against the input schema before your handler runs, and the output against the output schema after. Baton names those failures `invalid_argument` and `output_schema_mismatch`, read from go-sdk's own messages. Two failures are not named: arguments that pass the schema but not the conversion to your Go type, and a call your own middleware turns away before the tool runs (`refused` in the other SDKs), which Baton cannot see.
+For a tool made with `mcp.AddTool`, go-sdk checks the arguments against the input schema before your handler runs, and the output against the output schema after. Baton names those failures `invalid_argument` and `output_schema_mismatch`, read from go-sdk's own messages. Arguments that pass the schema but not the conversion to your Go type are not named.
+
+**A call your own middleware stops with an error** before the tool runs, such as an auth or credits check, is named `refused` when you give that middleware to Baton instead of adding it yourself:
+
+```go
+handle, err := baton.Install(server, baton.Config{Middleware: []mcp.Middleware{auth}})
+```
+
+Baton adds it inside its own middleware, so Baton sees every call, and a call that never got past your middleware is `refused`. Under `ResultCapture: "off"` its message is withheld, unless it is a `*baton.PublicError`. A call your middleware lets through is recorded with the `ctx` it passes on, so `ResolvePrincipal` sees what your auth put there. Call `next` before your middleware returns, not in a goroutine it leaves running, and pass on that `ctx` (or one made from it) or the same request. A call your middleware sends on twice, as a retry does, is recorded once, from the first try. If your middleware changes both the `ctx` and the request, Baton loses track of the call: it is recorded without what your auth set, and a failure of your tool is sent as `refused`. Your middleware also checks calls to Baton's annotation tool. It does not see the tool listings Baton makes for itself. When `Install` adds nothing (`BATON_DISABLED`, no DSN, or an error), it still adds your middleware, so your auth always runs; do not add it again.
+
+**Middleware you add yourself is not named.** Added with `AddReceivingMiddleware` before `Install`, a call it stops looks like your tool's own error. Added after `Install`, it runs before Baton, so a call it stops is not recorded at all.
 
 ## Turning capture off entirely
 
