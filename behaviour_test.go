@@ -224,6 +224,36 @@ func TestInstructionsGoAfterTheVendors(t *testing.T) {
 	}
 }
 
+func TestALibrarysPlaceholderNameIsNotUsed(t *testing.T) {
+	for name, want := range map[string]string{
+		"FastMCP": "", " fastmcp ": "", "MCP-SERVER": "", "\tmcp-server\n": "", "fastmcp\x1f": "",
+		// Only the exact names, as in baton-sdk.
+		"MCP Server": "MCP Server", "fastmcp!": "fastmcp!",
+	} {
+		if got := nameTheVendorChose(name); got != want {
+			t.Errorf("%q gave %q, want %q", name, got, want)
+		}
+	}
+	server := mcp.NewServer(&mcp.Implementation{Name: "FastMCP"}, nil)
+	addLookup(server)
+	installOn(t, server, Config{ReportMode: "on"})
+	cs := connect(t, server)
+	if got := cs.InitializeResult().Instructions; strings.Contains(got, "FastMCP") || !strings.Contains(got, "acme_annotate") {
+		t.Errorf("instructions = %q", got)
+	}
+}
+
+func TestAnUnusedAnnotationToolNameWarns(t *testing.T) {
+	logs := captureLogs(t)
+	server := newVectorServer()
+	addLookup(server)
+	installOn(t, server, Config{AnnotationToolName: "acme_report"})
+	installOn(t, newVectorServer(), Config{AnnotationToolName: "acme_report", ReportMode: "on"})
+	if strings.Count(logs.String(), "has no effect") != 1 {
+		t.Errorf("want one warning, for ReportMode off only:\n%s", logs)
+	}
+}
+
 // SPEC §3.4 rung 4: the Mcp-Session-Id a stateful server issues is the session.
 func TestStatefulHTTPUsesTheSessionID(t *testing.T) {
 	server, sink := installWithSink(t, Config{}, addLookup)

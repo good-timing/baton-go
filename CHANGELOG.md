@@ -34,6 +34,13 @@
   `refused`, and one that could not be encoded `encode_failed`** (SPEC
   §2.5), not `unsent_at_close`. An event close finds not yet measured is
   still `unsent_at_close`.
+- **A server named exactly `fastmcp` or `mcp-server`, in any case, counts as
+  unnamed,** as in `baton-sdk`: the report tool is `<vendor>_annotate` and the
+  text names the vendor id. Before, Go skipped any name whose slug was
+  `mcp-server`, such as `MCP Server`, for the tool name only, and not
+  `fastmcp`.
+- **`AnnotationToolName` with `ReportMode` off logs a warning** that it has no
+  effect, as in `baton-sdk` and `baton-ts`.
 
 ## 0.1.5
 

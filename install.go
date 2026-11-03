@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -195,6 +196,10 @@ func configure(cfg Config) (*installed, error) {
 	if cfg.IntentParam == "required" {
 		b.requiredNames = []string{userGoalParam}
 	}
+	if cfg.ReportMode != "on" && cfg.AnnotationToolName != "" {
+		slog.Warn(`baton: AnnotationToolName has no effect with ReportMode "off", because no annotation tool is served`,
+			"name", cfg.AnnotationToolName)
+	}
 	if cfg.ResultCapture == "off" {
 		slog.Warn(`baton: ResultCapture "off" does not withhold the message of a failed listing, prompt or resource request. ` +
 			"tool_list_error, prompt_list_error, prompt_get_error, resource_list_error and resource_read_error carry that message, " +
@@ -203,10 +208,6 @@ func configure(cfg Config) (*installed, error) {
 	return b, nil
 }
 
-// nameTheAnnotateTool settles the display name and the annotate tool's name,
-// and renders the report pointer with them. The names must not depend on
-// any session: a stateless server lists tools in one request and calls them
-// in another, maybe in another process.
 // validToolName checks the report tool's name when the tool is served, as
 // baton-sdk does (TestWithoutADSNABadSettingStillFails).
 func validToolName(cfg Config) error {
@@ -216,14 +217,19 @@ func validToolName(cfg Config) error {
 	return nil
 }
 
+// nameTheAnnotateTool settles the display name and the annotate tool's name,
+// and renders the report pointer with them. The names must not depend on
+// any session: a stateless server lists tools in one request and calls them
+// in another, maybe in another process.
 func (b *installed) nameTheAnnotateTool() error {
-	b.displayName = cmp.Or(b.cfg.VendorDisplayName, b.server.name, b.vendorID)
+	chosen := nameTheVendorChose(b.server.name)
+	b.displayName = cmp.Or(b.cfg.VendorDisplayName, chosen, b.vendorID)
 	if b.cfg.ReportMode != "on" {
 		return nil
 	}
 	candidates := []string{b.cfg.AnnotationToolName}
 	if b.cfg.AnnotationToolName == "" {
-		candidates = []string{slugAnnotateName(b.server.name), b.vendorID + annotateSuffix}
+		candidates = []string{slugAnnotateName(chosen), b.vendorID + annotateSuffix}
 	}
 	var err error
 	for i, name := range candidates {
@@ -250,6 +256,21 @@ const slugCap = 30
 
 var collapseHyphens = regexp.MustCompile(`-+`)
 
+// nameTheVendorChose is the server's name, or "" for a default name an MCP
+// library gives a server, which baton-sdk skips for both names too
+// (TestALibrarysPlaceholderNameIsNotUsed).
+func nameTheVendorChose(serverName string) string {
+	trimmed := strings.TrimFunc(serverName, isPythonSpace)
+	if lowered := lowerLikePython(trimmed); lowered == "fastmcp" || lowered == "mcp-server" {
+		return ""
+	}
+	return serverName
+}
+
+// isPythonSpace is what Python's str.strip removes: Go's spaces and U+001C to
+// U+001F, which Go does not count.
+func isPythonSpace(r rune) bool { return unicode.IsSpace(r) || (r >= 0x1c && r <= 0x1f) }
+
 // slugAnnotateName is "<slug of the server name>_annotate", the same slug as
 // baton-sdk, or "" when the name gives none.
 func slugAnnotateName(serverName string) string {
@@ -263,7 +284,7 @@ func slugAnnotateName(serverName string) string {
 	if len(slug) > slugCap {
 		slug = strings.Trim(slug[:slugCap], "-")
 	}
-	if slug == "" || slug == "mcp-server" {
+	if slug == "" {
 		return ""
 	}
 	return slug + annotateSuffix
