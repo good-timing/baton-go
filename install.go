@@ -43,6 +43,16 @@ const sdkVersion = "go-" + Version
 
 const defaultConsentToken = "customer-consented"
 
+// The values of Config.ResultCaptureMode, IntentParamMode and ReportMode.
+const (
+	ResultCaptureFull   = "full"
+	ResultCaptureOff    = "off"
+	IntentParamRequired = "required"
+	IntentParamOptional = "optional"
+	ReportOn            = "on"
+	ReportOff           = "off"
+)
+
 type Config struct {
 	// DSN is the value from /account, and names the server. Empty means the
 	// BATON_DSN environment variable, unless Sink, VendorID or TenantID is
@@ -58,14 +68,15 @@ type Config struct {
 	TenantID          string
 	VendorDisplayName string
 	ConsentToken      string
-	// ResultCapture is "full" (default) or "off", which withholds results
-	// and error text (SPEC §11.4).
-	ResultCapture string
-	// IntentParam is "required" (default) or "optional": whether each tool's
-	// listed schema marks user_goal required. Nothing enforces it.
-	IntentParam string
-	// ReportMode "on" adds the tool an agent reports problems with; "off"
-	// (default) adds none.
+	// ResultCaptureMode is ResultCaptureFull (default) or ResultCaptureOff,
+	// which withholds results and error text (SPEC §11.4).
+	ResultCaptureMode string
+	// IntentParamMode is IntentParamRequired (default) or IntentParamOptional:
+	// whether each tool's listed schema marks user_goal required. Nothing
+	// enforces it.
+	IntentParamMode string
+	// ReportMode ReportOn adds the tool an agent reports problems with;
+	// ReportOff (default) adds none.
 	ReportMode         string
 	AnnotationToolName string
 	// Scrubber is applied to every captured value. Nil means DefaultScrubber;
@@ -77,7 +88,7 @@ type Config struct {
 	Middleware []mcp.Middleware
 }
 
-// PublicError marks an error message as safe to send under ResultCapture
+// PublicError marks an error message as safe to send under ResultCaptureMode
 // "off" (SPEC §11.4.3): return it from a tool handler.
 type PublicError struct{ Message string }
 
@@ -258,17 +269,17 @@ func oneOf(field, value string, allowed ...string) error {
 
 func configure(impl *mcp.Implementation, opts *mcp.ServerOptions, cfg Config) (*Baton, error) {
 	cfg.ConsentToken = cmp.Or(cfg.ConsentToken, defaultConsentToken)
-	cfg.ResultCapture = cmp.Or(cfg.ResultCapture, "full")
-	cfg.IntentParam = cmp.Or(cfg.IntentParam, "required")
-	cfg.ReportMode = cmp.Or(cfg.ReportMode, "off")
+	cfg.ResultCaptureMode = cmp.Or(cfg.ResultCaptureMode, ResultCaptureFull)
+	cfg.IntentParamMode = cmp.Or(cfg.IntentParamMode, IntentParamRequired)
+	cfg.ReportMode = cmp.Or(cfg.ReportMode, ReportOff)
 	customScrubber := cfg.Scrubber != nil
 	if !customScrubber {
 		cfg.Scrubber = DefaultScrubber
 	}
 	if err := errors.Join(
-		oneOf("ResultCapture", cfg.ResultCapture, "full", "off"),
-		oneOf("IntentParam", cfg.IntentParam, "required", "optional"),
-		oneOf("ReportMode", cfg.ReportMode, "on", "off"),
+		oneOf("ResultCaptureMode", cfg.ResultCaptureMode, ResultCaptureFull, ResultCaptureOff),
+		oneOf("IntentParamMode", cfg.IntentParamMode, IntentParamRequired, IntentParamOptional),
+		oneOf("ReportMode", cfg.ReportMode, ReportOn, ReportOff),
 		validToolName(cfg),
 		noNilMiddleware(cfg),
 		namedServer(impl),
@@ -280,7 +291,7 @@ func configure(impl *mcp.Implementation, opts *mcp.ServerOptions, cfg Config) (*
 		serverName:          impl.Name,
 		serverInfo:          jsonValue(impl),
 		customScrubber:      customScrubber,
-		userGoalDescription: userGoalDescription(cfg.IntentParam),
+		userGoalDescription: userGoalDescription(cfg.IntentParamMode),
 		requiredNames:       []string{},
 		seq:                 newSequencer(),
 		sentSurfaces:        newLRU[string, struct{}](sentSurfacesCap),
@@ -289,15 +300,15 @@ func configure(impl *mcp.Implementation, opts *mcp.ServerOptions, cfg Config) (*
 	if opts != nil {
 		b.instructions = opts.Instructions
 	}
-	if cfg.IntentParam == "required" {
+	if cfg.IntentParamMode == "required" {
 		b.requiredNames = []string{userGoalParam}
 	}
 	if cfg.ReportMode != "on" && cfg.AnnotationToolName != "" {
 		slog.Warn(`baton: AnnotationToolName has no effect with ReportMode "off", because no annotation tool is served`,
 			"name", cfg.AnnotationToolName)
 	}
-	if cfg.ResultCapture == "off" {
-		slog.Warn(`baton: ResultCapture "off" does not withhold the message of a failed listing, prompt or resource request. ` +
+	if cfg.ResultCaptureMode == "off" {
+		slog.Warn(`baton: ResultCaptureMode "off" does not withhold the message of a failed listing, prompt or resource request. ` +
 			"tool_list_error, prompt_list_error, prompt_get_error, resource_list_error and resource_read_error carry that message, " +
 			"which can include text your handler returned. Return a message that names the resource, not its contents.")
 	}

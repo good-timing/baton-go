@@ -43,7 +43,7 @@ type measure struct {
 	ResultBytes int    `json:"result_bytes"`
 }
 
-var spec = filepath.Join("..", "baton-spec")
+var spec = filepath.Join("..", "..", "baton-spec")
 
 // collectors are killed by fatal too: os.Exit skips withCollector's defer,
 // and a hang-mode collector never exits on its own.

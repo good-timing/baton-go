@@ -122,7 +122,7 @@ func TestAVendorToolWithTheAnnotateNameWins(t *testing.T) {
 }
 
 func TestWrappedPublicErrorKeepsItsMessage(t *testing.T) {
-	server, sink := installWithSink(t, Config{ResultCapture: "off"}, func(s *mcp.Server) {
+	server, sink := installWithSink(t, Config{ResultCaptureMode: "off"}, func(s *mcp.Server) {
 		mcp.AddTool(s, &mcp.Tool{Name: "p"}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
 			return nil, nil, fmt.Errorf("lookup row 42: %w", &PublicError{Message: "try a shorter name"})
 		})

@@ -97,7 +97,7 @@ func usableIdentityText(s string) bool {
 // wireIdentity sends id as the resolver returned it, cut at identityCap code
 // points as the reference producers do; an unusable id gives no identity, and
 // a display name past the cap is dropped (SPEC §11.4).
-func wireIdentity(id, displayName string, hashed bool) *identityWire {
+func wireIdentity(id, displayName string, hashed bool) *Identity {
 	if !usableIdentityText(id) {
 		return nil
 	}
@@ -106,7 +106,7 @@ func wireIdentity(id, displayName string, hashed bool) *identityWire {
 	if hashed {
 		form = "hashed"
 	}
-	w := &identityWire{ID: id, Source: "asserted", Form: form}
+	w := &Identity{ID: id, Source: "asserted", Form: form}
 	if usableIdentityText(displayName) && utf8.RuneCountInString(displayName) <= identityCap {
 		w.DisplayName = &displayName
 	}
@@ -127,7 +127,7 @@ var stuckHooks atomic.Int64
 // (SPEC §11.2). While hookCeiling timed-out ones still run, it is not called
 // (TestOnlyTimedOutResolversCountTowardTheCeiling); calls already waiting can
 // still add to them.
-func (b *installed) resolveCaller(ctx context.Context, caller func() Caller) (principal, org *identityWire) {
+func (b *installed) resolveCaller(ctx context.Context, caller func() Caller) (principal, org *Identity) {
 	defer func() {
 		if r := recover(); r != nil {
 			logRecovered("baton: building the principal failed; the event carries no principal", r)

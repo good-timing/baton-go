@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+- **Breaking: two `Config` fields are renamed,** to the names Python and
+  TypeScript use. This breaks at compile time:
+
+  ```go
+  // Before
+  baton.Config{ResultCapture: "off", IntentParam: "optional"}
+
+  // After
+  baton.Config{ResultCaptureMode: "off", IntentParamMode: "optional"}
+  ```
+
+  The error for a value that is not allowed names the new field.
+- **Named values for the modes:** `ResultCaptureFull`, `ResultCaptureOff`,
+  `IntentParamRequired`, `IntentParamOptional`, `ReportOn` and `ReportOff`.
+  They are plain strings, so `"off"` still works.
+- **`Event`'s member types are exported:** `Event.Principal` and
+  `Event.Organization` are `*Identity`, and `Event.ClientObserved` is
+  `*ClientObserved` with `Info *ClientInfo`. Their fields and JSON are
+  unchanged. A custom `Sink` can now name them, and a vendor's test can
+  build an `Event` with them.
+- **Breaking for anyone running the bench: `bench/` moved to
+  `internal/bench/`.**
+
+  ```sh
+  # Before
+  bench/bench.sh
+  # After
+  internal/bench/bench.sh
+  ```
+
+  It is its own module and was never part of the library's API.
 - **The report tool is named once, in `New`, not in every `Wrap`.** A
   `VendorDisplayName` that leaves no room for the report tool is now a config
   error from `New`, as it already was from `Install`. Before, each `Wrap` logged one warning and served the server

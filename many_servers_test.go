@@ -298,7 +298,7 @@ func TestWrapAddsTheVendorsMiddlewareOnceOnEveryPath(t *testing.T) {
 		"no DSN":         {env: map[string]string{"BATON_DSN": ""}},
 		"BATON_DISABLED": {env: map[string]string{"BATON_DISABLED": "1"}},
 		"after Close":    {env: map[string]string{"BATON_DSN": ""}, cfg: Config{VendorID: "acme", Sink: &recordingSink{}}, close: true},
-		"config error":   {env: map[string]string{"BATON_DISABLED": ""}, cfg: Config{ResultCapture: "none"}, wantErr: true},
+		"config error":   {env: map[string]string{"BATON_DISABLED": ""}, cfg: Config{ResultCaptureMode: "none"}, wantErr: true},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

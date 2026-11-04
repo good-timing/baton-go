@@ -1,5 +1,5 @@
 # baton-spec's speed and load measures, the last release against this commit
-# (bench/bench.sh). Reports only: nothing here gates a release. A tag's
+# (internal/bench/bench.sh). Reports only: nothing here gates a release. A tag's
 # results are also kept on the bench-results branch.
 name: Bench
 
@@ -27,7 +27,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - run: bench/bench.sh bench-results
+      - run: internal/bench/bench.sh bench-results
         env:
           BENCH_AGAINST: ${{ inputs.against }}
       - run: cat bench-results/compare.md >> "$GITHUB_STEP_SUMMARY"

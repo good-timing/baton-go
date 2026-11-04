@@ -198,7 +198,7 @@ func TestGoSDKsOwnChecksAreNamed(t *testing.T) {
 		{"raw", "<absent>", "marshaling output"},
 	}
 	for _, capture := range []string{"full", "off"} {
-		server, sink := installWithSink(t, Config{ResultCapture: capture}, register)
+		server, sink := installWithSink(t, Config{ResultCaptureMode: capture}, register)
 		cs := connect(t, server)
 		for _, c := range cases {
 			_, _ = cs.CallTool(context.Background(), &mcp.CallToolParams{Name: c.tool, Arguments: map[string]any{"name": 5}})
@@ -352,7 +352,7 @@ func TestStatelessHTTP(t *testing.T) {
 }
 
 func TestResultCaptureOff(t *testing.T) {
-	server, sink := installWithSink(t, Config{ResultCapture: "off"}, func(s *mcp.Server) {
+	server, sink := installWithSink(t, Config{ResultCaptureMode: "off"}, func(s *mcp.Server) {
 		addLookup(s)
 		mcp.AddTool(s, &mcp.Tool{Name: "secret"}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
 			return nil, nil, errors.New("row 42 belongs to bob")
@@ -645,7 +645,7 @@ func TestScrubberFixedSets(t *testing.T) {
 func TestTheOffSwitchInstallsNothingAndChecksNothing(t *testing.T) {
 	for _, v := range []string{"1", "true", "yes", " ON "} {
 		t.Setenv("BATON_DISABLED", v)
-		if handle, err := Install(nil, testImpl, nil, Config{DSN: "not a dsn", ResultCapture: "bogus"}); err != nil || handle == nil {
+		if handle, err := Install(nil, testImpl, nil, Config{DSN: "not a dsn", ResultCaptureMode: "bogus"}); err != nil || handle == nil {
 			t.Errorf("BATON_DISABLED=%q: handle %v, err %v", v, handle, err)
 		}
 		server := newVectorServer()

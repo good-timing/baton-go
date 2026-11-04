@@ -125,7 +125,7 @@ func TestBatonsOwnListingsAreNotRecorded(t *testing.T) {
 func TestUnderResultCaptureOffAFailedRequestKeepsItsMessage(t *testing.T) {
 	for _, capture := range []string{"full", "off"} {
 		logs := captureLogs(t)
-		server, sink := installWithSink(t, Config{ResultCapture: capture}, addPromptsAndResources)
+		server, sink := installWithSink(t, Config{ResultCaptureMode: capture}, addPromptsAndResources)
 		_, _ = connect(t, server).GetPrompt(context.Background(), &mcp.GetPromptParams{Name: "broken"})
 		got := asJSON(t, ofType(sink.all(), "prompt_get_error"))[0]["payload"].(map[string]any)
 		if _, marked := got["result_capture"]; marked || got["error_body"] != "no such fleet" {

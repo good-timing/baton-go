@@ -518,7 +518,7 @@ func TestWithoutADSNABadSettingStillFails(t *testing.T) {
 		cfg    Config
 	}{
 		"no server":            {nil, Config{}},
-		"bad value":            {newVectorServer(), Config{ResultCapture: "none"}},
+		"bad value":            {newVectorServer(), Config{ResultCaptureMode: "none"}},
 		"bad report tool name": {newVectorServer(), Config{ReportMode: "on", AnnotationToolName: "not a name"}},
 	} {
 		if _, err := Install(c.server, testImpl, nil, c.cfg); err == nil {

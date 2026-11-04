@@ -282,10 +282,10 @@ func (b *installed) withUserGoal(t *mcp.Tool) *mcp.Tool {
 type callContext struct {
 	session     callSession
 	callID      string
-	principal   *identityWire
-	org         *identityWire
+	principal   *Identity
+	org         *Identity
 	runtimeMeta map[string]any
-	client      *clientObserved
+	client      *ClientObserved
 }
 
 func (b *installed) newCallContext(ctx context.Context, r mcp.Request) callContext {
@@ -488,7 +488,7 @@ func (b *installed) stripGoalParams(r *mcp.CallToolRequest, tool *mcp.Tool) (any
 
 // emitOutcome sends the call's end or error. A failure is classified, kind
 // replaces the classification when set, and then it is withheld in one place
-// under ResultCapture "off" (SPEC §11.4.3).
+// under ResultCaptureMode "off" (SPEC §11.4.3).
 func (b *installed) emitOutcome(cc callContext, toolName string, known, checksOutput bool, kind *string, res mcp.Result, err error, elapsed int64) {
 	result, _ := res.(*mcp.CallToolResult)
 	failure := toolCallError{ToolName: toolName, DurationMS: elapsed}
@@ -555,7 +555,7 @@ func errorType(err error) string {
 	}
 }
 
-func (b *installed) withholding() bool { return b.cfg.ResultCapture == "off" }
+func (b *installed) withholding() bool { return b.cfg.ResultCaptureMode == "off" }
 
 func contentText(content []mcp.Content) string {
 	var parts []string

@@ -12,9 +12,9 @@ type Event struct {
 	ConsentToken      string          `json:"consent_token"`
 	SDKVersion        string          `json:"sdk_version"`
 	AgentRuntime      string          `json:"agent_runtime"`
-	ClientObserved    *clientObserved `json:"client_observed"`
-	Principal         *identityWire   `json:"principal"`
-	Organization      *identityWire   `json:"organization"`
+	ClientObserved    *ClientObserved `json:"client_observed"`
+	Principal         *Identity       `json:"principal"`
+	Organization      *Identity       `json:"organization"`
 	CallID            *string         `json:"call_id"`
 	TransportObserved *string         `json:"transport_observed"`
 	SessionIDOrigin   *string         `json:"session_id_origin"`
@@ -23,7 +23,9 @@ type Event struct {
 	Payload           any             `json:"payload"`
 }
 
-type identityWire struct {
+// Identity is a Principal or Organization as sent (SPEC §11.4). Form is
+// "hashed" or "raw".
+type Identity struct {
 	ID          string  `json:"id"`
 	Source      string  `json:"source"`
 	Form        string  `json:"form"`

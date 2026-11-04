@@ -50,7 +50,7 @@ func TestACallTheVendorsMiddlewareStopsIsRefused(t *testing.T) {
 		{"lookup", map[string]any{"name": 5}, "invalid_argument"},
 	}
 	for _, capture := range []string{"full", "off"} {
-		server, sink := installWithSink(t, Config{ResultCapture: capture, Middleware: []mcp.Middleware{gate}}, addGatedTools)
+		server, sink := installWithSink(t, Config{ResultCaptureMode: capture, Middleware: []mcp.Middleware{gate}}, addGatedTools)
 		cs := connect(t, server)
 		for _, c := range cases {
 			_, _ = cs.CallTool(context.Background(), &mcp.CallToolParams{Name: c.tool, Arguments: c.args})
@@ -139,7 +139,7 @@ func TestTheVendorsMiddlewareRunsWhenBatonIsNotInstalled(t *testing.T) {
 	}{
 		"BATON_DISABLED": {env: map[string]string{"BATON_DISABLED": "1"}},
 		"no DSN":         {env: map[string]string{"BATON_DSN": ""}},
-		"a bad config":   {env: map[string]string{"BATON_DSN": "https://baton_pk_x@baton.example/ten_x/s"}, cfg: Config{ResultCapture: "none"}},
+		"a bad config":   {env: map[string]string{"BATON_DSN": "https://baton_pk_x@baton.example/ten_x/s"}, cfg: Config{ResultCaptureMode: "none"}},
 		"a bad VendorID": {cfg: Config{VendorID: "not a vendor id", Sink: &recordingSink{}}},
 	}
 	for name, c := range cases {
@@ -246,7 +246,7 @@ func TestARefusalMarkedPublicIsKeptUnderOff(t *testing.T) {
 			return next(ctx, method, req)
 		}
 	}
-	server, sink := installWithSink(t, Config{ResultCapture: "off", Middleware: []mcp.Middleware{public}}, addLookup)
+	server, sink := installWithSink(t, Config{ResultCaptureMode: "off", Middleware: []mcp.Middleware{public}}, addLookup)
 	_, _ = connect(t, server).CallTool(context.Background(), &mcp.CallToolParams{Name: "lookup", Arguments: map[string]any{"name": "a"}})
 	failures := ofType(sink.all(), "tool_call_error")
 	if len(failures) != 1 {
