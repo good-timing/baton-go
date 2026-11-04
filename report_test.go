@@ -153,7 +153,7 @@ func TestALoneReportThatFailsDoesNotPauseEvents(t *testing.T) {
 			console.noBatch = http.StatusNotFound
 			s.client.Timeout = 20 * time.Millisecond
 			sendAll(t, s, 1)
-			s.flushEvery = time.Hour
+			s.locked(func() { s.flushEvery = time.Hour })
 			s.reportDue(tenantEvent(0))
 			for n := 1; n <= 2*breakerThreshold; n++ {
 				s.write(tenantEvent(n))
@@ -172,7 +172,7 @@ func TestCloseDropsAWaitingReport(t *testing.T) {
 	captureLogs(t)
 	s, console := reportSink(t, []int{400, 202}, 0)
 	sendAll(t, s, 1)
-	s.flushEvery = time.Hour
+	s.locked(func() { s.flushEvery = time.Hour })
 	s.reportDue(tenantEvent(1))
 	if reportIdle(s) {
 		t.Fatal("no report is waiting")
@@ -223,7 +223,7 @@ func TestAReportRefusedInABatchStopsReportsOnlyAsMalformed(t *testing.T) {
 			console.refuseCodes = c.codes
 			sendAll(t, s, 1)
 			writeBesideAReport(t, s, console)
-			s.flushEvery = 0
+			s.locked(func() { s.flushEvery = 0 })
 			sendAll(t, s, 2)
 			if console.count() != 5 || console.reportCount() != c.reports {
 				t.Errorf("%d requests, %d reports; want 5, %d", console.count(), console.reportCount(), c.reports)
@@ -239,7 +239,7 @@ func TestAWholeBatchRefusalOfEventsWithAReportDoesNotStopReports(t *testing.T) {
 	s.reportEvery = 0
 	sendAll(t, s, 1)
 	writeBesideAReport(t, s, console)
-	s.flushEvery = 0
+	s.locked(func() { s.flushEvery = 0 })
 	sendAll(t, s, 2)
 	if console.reportCount() != 2 || console.reportsAlone != 1 {
 		t.Errorf("%d reports, %d alone; want 2, 1", console.reportCount(), console.reportsAlone)
@@ -250,7 +250,7 @@ func TestAReportRidesABatchWhileMoreEventsWait(t *testing.T) {
 	captureLogs(t)
 	s, console := reportSink(t, []int{400, 202, 202, 202}, 0)
 	sendAll(t, s, 1)
-	s.flushEvery = time.Second
+	s.locked(func() { s.flushEvery = time.Second })
 	s.write(tenantEvent(1))
 	waitFor(t, "the delivery", func() bool { return !reportIdle(s) })
 	// Two of these fill a batch by bytes, so the third waits for the next.
@@ -267,7 +267,7 @@ func TestABatchKeptForALaterTryKeepsItsReport(t *testing.T) {
 	captureLogs(t)
 	s, console := reportSink(t, []int{400, 202, 500, 500, 500, 500, 202}, 0)
 	sendAll(t, s, 1)
-	s.flushEvery = 200 * time.Millisecond
+	s.locked(func() { s.flushEvery = 200 * time.Millisecond })
 	s.write(tenantEvent(1))
 	waitFor(t, "the delivery", func() bool { return !reportIdle(s) })
 	s.write(tenantEvent(2))
@@ -281,7 +281,7 @@ func TestABatchKeptForALaterTryKeepsItsReport(t *testing.T) {
 // due waits too, then writes another, which goes in the report's batch.
 func writeBesideAReport(t *testing.T, s *httpSink, console *fakeConsole) {
 	t.Helper()
-	s.flushEvery = 200 * time.Millisecond
+	s.locked(func() { s.flushEvery = 200 * time.Millisecond })
 	before := console.count()
 	s.write(tenantEvent(1))
 	waitFor(t, "the delivery", func() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.report != nil })
@@ -375,7 +375,7 @@ func TestABatchKeptAfterCloseBeganLosesItsReport(t *testing.T) {
 		return 202
 	}
 	sendAll(t, s, 1)
-	s.flushEvery = 200 * time.Millisecond
+	s.locked(func() { s.flushEvery = 200 * time.Millisecond })
 	s.write(tenantEvent(1))
 	waitFor(t, "the delivery", func() bool { return !reportIdle(s) })
 	s.write(tenantEvent(2))
@@ -394,7 +394,7 @@ func TestADueReportTakesAPlaceInABatchFullByCount(t *testing.T) {
 	captureLogs(t)
 	s, console := reportSink(t, []int{400, 202, 202, 202, 202, 202}, 0)
 	sendAll(t, s, 1)
-	s.flushEvery = time.Second
+	s.locked(func() { s.flushEvery = time.Second })
 	s.write(tenantEvent(1))
 	waitFor(t, "the delivery", func() bool { return !reportIdle(s) })
 	for i := range 3 * batchCap {
@@ -411,7 +411,7 @@ func TestADueReportKeepsByteRoomInABatch(t *testing.T) {
 	captureLogs(t)
 	s, console := reportSink(t, []int{400, 202, 202, 202, 202}, 0)
 	sendAll(t, s, 1)
-	s.flushEvery = time.Second
+	s.locked(func() { s.flushEvery = time.Second })
 	s.write(tenantEvent(1))
 	waitFor(t, "the delivery", func() bool { return !reportIdle(s) })
 	// Two of these fill a batch to 10 bytes under the cap, with no room for the report.
@@ -443,7 +443,7 @@ func TestASplitBatchKeepsTheNewerReport(t *testing.T) {
 	console.refuse = func(e map[string]any) bool { return e["sequence_number"] == 2.0 }
 	s.reportEvery = 0
 	sendAll(t, s, 1)
-	s.flushEvery = 200 * time.Millisecond
+	s.locked(func() { s.flushEvery = 200 * time.Millisecond })
 	s.write(tenantEvent(1))
 	waitFor(t, "the delivery", func() bool { return !reportIdle(s) })
 	for n := 2; n <= 5; n++ {
@@ -462,7 +462,7 @@ func TestAReportSplitOffItsEventsIsKept(t *testing.T) {
 	captureLogs(t)
 	s, console := reportSink(t, []int{400, 202, 413, 202, 202}, 500)
 	sendAll(t, s, 1)
-	s.flushEvery = time.Second
+	s.locked(func() { s.flushEvery = time.Second })
 	s.write(tenantEvent(1))
 	waitFor(t, "the delivery", func() bool { return !reportIdle(s) })
 	s.write(tenantEvent(2))
