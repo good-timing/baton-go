@@ -34,7 +34,16 @@ func probeServer(server *mcp.Server) (serverMeta, error) {
 	if err != nil {
 		return serverMeta{}, err
 	}
-	defer session.Close()
+	// Close waits for requests still running, such as an initialize a vendor
+	// middleware holds, so it is waited for only until the probe's deadline.
+	defer func() {
+		closed := make(chan struct{})
+		go func() { session.Close(); close(closed) }()
+		select {
+		case <-closed:
+		case <-ctx.Done():
+		}
+	}()
 	ioConnType := connType(session)
 	conn, err := clientSide.Connect(ctx)
 	if err != nil {

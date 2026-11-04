@@ -2,6 +2,20 @@
 //
 //	handle, err := baton.Install(server, baton.Config{DSN: "https://baton_pk_...@baton.goodtiming.ai/ten_.../my-server"})
 //	defer handle.Close(context.Background())
+//
+// A process that builds a new server per request makes one Baton at startup
+// and wraps each server; the servers share its sender and sink:
+//
+//	b, err := baton.New(cfg)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	defer b.Close(context.Background())
+//	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+//		s := newServer()
+//		b.Wrap(s)
+//		return s
+//	}, nil)
 package baton
 
 import (
@@ -16,6 +30,7 @@ import (
 	"strings"
 	"sync"
 	"unicode"
+	"weak"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -32,8 +47,8 @@ type Config struct {
 	// set. With none of these, Install adds nothing and records nothing.
 	DSN string
 	// Sink, without a DSN, is where events go instead of a collector. Empty
-	// with VendorID set means StdoutSink. Give each Install its own Sink:
-	// each Handle.Close closes its Sink.
+	// with VendorID set means StdoutSink. Give each Install or New its own
+	// Sink: each Handle.Close or Baton.Close closes its Sink.
 	Sink Sink
 	// VendorID names the server when there is no DSN, and is required then.
 	VendorID string
@@ -70,13 +85,10 @@ type Handle struct {
 	b *installed
 }
 
-// Close sends what is still buffered until shortly before ctx's deadline, or
-// before 3 seconds when ctx has none, then stops sending and counts what it
-// did not deliver, returning at about that deadline. Events recorded after
-// Close are dropped.
+// Close closes the Baton Install made; see Baton.Close.
 func (h *Handle) Close(ctx context.Context) {
 	if h != nil && h.b != nil {
-		h.b.sink.close(ctx)
+		h.b.Close(ctx)
 	}
 }
 
@@ -84,33 +96,20 @@ var toolNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
 const toolCacheCap = 4096
 
+// installed is one server's part of a Baton, freed with that server.
 type installed struct {
-	cfg                 Config
-	customScrubber      bool
-	vendorID            string
-	tenantID            string
-	sink                sink
-	displayName         string
-	annotateName        string
-	annotate            annotateTool
-	reportPointer       string
-	truncationWarned    sync.Once
-	userGoalDescription string
-	requiredNames       []string
-	server              serverMeta
-	sessions            *sessions
-	seq                 *sequencer
-	schemas             *lru[*mcp.Tool, map[string]any]
-	listed              *lru[*mcp.Tool, *mcp.Tool]
-	sentSurfaces        *lru[string, struct{}]
-	lastSurface         lastSurface
-	belowVendor         mcp.MethodHandler
-	passages            sync.Map // mcp.Request → *passage
-	clashWarned         sync.Once
-	scrubPanicLogged    sync.Map
-	paramsShapeWarned   sync.Once
-	hooksStuckWarned    sync.Once
-	hookSlowWarned      sync.Once
+	*Baton
+	displayName   string
+	annotateName  string
+	annotate      annotateTool
+	reportPointer string
+	server        serverMeta
+	sessions      *sessions
+	schemas       *lru[*mcp.Tool, map[string]any]
+	listed        *lru[*mcp.Tool, *mcp.Tool]
+	lastSurface   lastSurface
+	belowVendor   mcp.MethodHandler
+	passages      sync.Map // mcp.Request → *passage
 }
 
 // Install adds Baton to server. Call it after the vendor's own AddTool lines;
@@ -118,9 +117,10 @@ type installed struct {
 // Config.Middleware: middleware added after Install runs before Baton, so a
 // call it stops is not recorded. Install adds Config.Middleware even when it
 // adds nothing of Baton's or returns an error, so do not add it again. Call it
-// once per server: each Install starts its own sender, which runs until Close.
-// With BATON_DISABLED=1 in the environment, Install adds nothing else and
-// checks nothing, not even server or cfg.
+// once per server: each Install starts its own sender, which runs until Close;
+// for servers built per request, use New and Wrap. With BATON_DISABLED=1 in
+// the environment, Install adds nothing else and checks nothing, not even
+// server or cfg.
 func Install(server *mcp.Server, cfg Config) (h *Handle, err error) {
 	// When Baton adds nothing, the vendor's middleware still runs: it may be
 	// their auth (TestTheVendorsMiddlewareRunsWhenBatonIsNotInstalled).
@@ -136,32 +136,45 @@ func Install(server *mcp.Server, cfg Config) (h *Handle, err error) {
 	if server == nil {
 		return nil, errors.New("baton: Install needs a server")
 	}
-	b, err := configure(cfg)
+	b, openSink, err := settle(cfg)
 	if err != nil {
 		return nil, err
 	}
+	if openSink == nil {
+		return &Handle{}, nil
+	}
+	return b.install(server, openSink)
+}
+
+// settle checks cfg and says where events go: openSink is nil, after one
+// warning, when nothing is configured.
+func settle(cfg Config) (b *Baton, openSink func() sink, err error) {
+	if b, err = configure(cfg); err != nil {
+		return nil, nil, err
+	}
 	local := cfg.Sink != nil || cfg.VendorID != "" || cfg.TenantID != ""
 	if cfg.DSN != "" && local {
-		return nil, errors.New("baton: Config has a DSN and also Sink, VendorID or TenantID; " +
+		return nil, nil, errors.New("baton: Config has a DSN and also Sink, VendorID or TenantID; " +
 			"a DSN names the server and where its events go, so set one or the other")
 	}
 	if local {
-		return b.installLocally(server, cfg)
+		openSink, err = b.settleLocally(cfg)
+		return b, openSink, err
 	}
 	raw := cmp.Or(cfg.DSN, os.Getenv("BATON_DSN"))
 	if raw == "" {
 		slog.Warn("baton: no DSN (Config.DSN or BATON_DSN) and no Sink or VendorID, so Baton is not installed and records nothing")
-		return &Handle{}, nil
+		return b, nil, nil
 	}
 	d, err := parseDSN(raw)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	b.vendorID, b.tenantID = d.vendorID, d.tenantID
-	return b.install(server, func() sink { return newHTTPSink(d.origin, d.key) })
+	return b, func() sink { return newHTTPSink(d.origin, d.key) }, nil
 }
 
-func (b *installed) installLocally(server *mcp.Server, cfg Config) (*Handle, error) {
+func (b *Baton) settleLocally(cfg Config) (func() sink, error) {
 	if !vendorIDPattern.MatchString(cfg.VendorID) {
 		return nil, fmt.Errorf("baton: Config.VendorID is %q; without a DSN it is required and must match %s",
 			cfg.VendorID, vendorIDPattern)
@@ -174,25 +187,44 @@ func (b *installed) installLocally(server *mcp.Server, cfg Config) (*Handle, err
 		out = StdoutSink()
 	}
 	b.vendorID, b.tenantID = cfg.VendorID, cmp.Or(cfg.TenantID, cfg.VendorID)
-	return b.install(server, func() sink { return newQueueSink(out) })
+	return func() sink { return newQueueSink(out) }, nil
 }
 
 // install starts the sink last, after everything that can fail.
-func (b *installed) install(server *mcp.Server, openSink func() sink) (*Handle, error) {
+func (b *Baton) install(server *mcp.Server, openSink func() sink) (*Handle, error) {
+	s, err := b.newServer(server)
+	if err != nil {
+		return nil, err
+	}
+	b.sink = openSink()
+	s.attach(server)
+	return &Handle{b: s}, nil
+}
+
+// newServer probes server and names its report tool. On a naming error the
+// server is still usable, without the report tool.
+func (b *Baton) newServer(server *mcp.Server) (*installed, error) {
 	meta, err := probeServer(server)
 	if err != nil {
 		// Never stop the vendor's server over this: the names fall back to
 		// the vendor id and the snapshot lacks the server's own details.
-		slog.Warn("baton: could not read the server's name and instructions; continuing without them", "error", err)
+		b.probeWarned.Do(func() {
+			slog.Warn("baton: could not read the server's name and instructions; continuing without them", "error", err)
+		})
 	}
-	b.server = meta
-	b.sessions.ioConnType = meta.ioConnType
-	if err := b.nameTheAnnotateTool(); err != nil {
-		return nil, err
+	s := &installed{
+		Baton:    b,
+		server:   meta,
+		sessions: newSessions(),
+		schemas:  newLRU[*mcp.Tool, map[string]any](toolCacheCap),
+		listed:   newLRU[*mcp.Tool, *mcp.Tool](toolCacheCap),
 	}
-	b.sink = openSink()
-	server.AddReceivingMiddleware(b.chain()...)
-	return &Handle{b: b}, nil
+	s.sessions.ioConnType = meta.ioConnType
+	return s, s.nameTheAnnotateTool()
+}
+
+func (s *installed) attach(server *mcp.Server) {
+	server.AddReceivingMiddleware(s.chain()...)
 }
 
 // chain puts the vendor's middleware between Baton's two, so a tools/call
@@ -235,7 +267,7 @@ func oneOf(field, value string, allowed ...string) error {
 	return fmt.Errorf("baton: Config.%s is %q; use one of %q", field, value, allowed)
 }
 
-func configure(cfg Config) (*installed, error) {
+func configure(cfg Config) (*Baton, error) {
 	cfg.ConsentToken = cmp.Or(cfg.ConsentToken, defaultConsentToken)
 	cfg.ResultCapture = cmp.Or(cfg.ResultCapture, "full")
 	cfg.IntentParam = cmp.Or(cfg.IntentParam, "required")
@@ -253,16 +285,14 @@ func configure(cfg Config) (*installed, error) {
 	); err != nil {
 		return nil, err
 	}
-	b := &installed{
+	b := &Baton{
 		cfg:                 cfg,
 		customScrubber:      customScrubber,
 		userGoalDescription: userGoalDescription(cfg.IntentParam),
 		requiredNames:       []string{},
-		sessions:            newSessions(),
 		seq:                 newSequencer(),
-		schemas:             newLRU[*mcp.Tool, map[string]any](toolCacheCap),
-		listed:              newLRU[*mcp.Tool, *mcp.Tool](toolCacheCap),
 		sentSurfaces:        newLRU[string, struct{}](sentSurfacesCap),
+		wrapped:             map[weak.Pointer[mcp.Server]]chan struct{}{},
 	}
 	if cfg.IntentParam == "required" {
 		b.requiredNames = []string{userGoalParam}
@@ -316,8 +346,10 @@ func (b *installed) nameTheAnnotateTool() error {
 			return nil
 		}
 		if i < len(candidates)-1 {
-			slog.Warn("baton: the server-derived annotation tool name does not fit beside VendorDisplayName; using the vendor id",
-				"name", name)
+			b.nameFitWarned.Do(func() {
+				slog.Warn("baton: the server-derived annotation tool name does not fit beside VendorDisplayName; using the vendor id",
+					"name", name)
+			})
 		}
 	}
 	return err

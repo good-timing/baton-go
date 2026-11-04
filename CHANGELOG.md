@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- **One Baton for many servers.** For a handler that builds a new
+  `*mcp.Server` per request (like `create_baton` in Python and `createBaton`
+  in TypeScript): `baton.New(cfg)` starts one sender and sink,
+  `b.Wrap(server)` adds Baton to each server, and `b.Close(ctx)` closes them
+  once. Identical servers send one `surface_snapshot`. A server already
+  wrapped is skipped. `Wrap` adds `Config.Middleware` to each server once,
+  even when Baton records nothing (a config error from `New`, no DSN,
+  `BATON_DISABLED`, or after `Close`), as `Install` does. `Wrap` returns an
+  error only for a nil server; if it cannot name the report tool, it warns
+  once and goes on without it.
+  `Install(server, cfg)` is the one-server form; its handle's `Close` closes
+  its sender.
+- **Known gap:** each wrapped server keeps its own counter for its fallback
+  session. That counter is not part of the 4096-session limit in SPEC §11.2
+  rule 5. It is freed when the server is freed. Python and TypeScript have
+  the same gap.
+
 ## 0.2.0
 
 - **Events can go to a file, to stderr, or to your own sink, without a

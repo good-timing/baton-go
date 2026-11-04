@@ -38,16 +38,23 @@ func installOn(t *testing.T, server *mcp.Server, cfg Config) *memorySink {
 // workspace is vendorID too, but with the sink open returns.
 func installAs(t *testing.T, server *mcp.Server, cfg Config, vendorID string, open func() sink) *Handle {
 	t.Helper()
+	handle, err := configuredAs(t, cfg, vendorID).install(server, open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return handle
+}
+
+// configuredAs is a Baton configured as for a DSN naming vendorID, whose
+// workspace is vendorID too, with no sink yet.
+func configuredAs(t *testing.T, cfg Config, vendorID string) *Baton {
+	t.Helper()
 	b, err := configure(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	b.vendorID, b.tenantID = vendorID, vendorID
-	handle, err := b.install(server, open)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return handle
+	return b
 }
 
 // serveHTTP serves server over streamable HTTP, or SSE, and returns the URL.
@@ -531,7 +538,7 @@ func TestAResolverThatStopsForItsContextIsATimeout(t *testing.T) {
 func TestACancelledRequestDoesNotCallTheResolver(t *testing.T) {
 	logs := captureLogs(t)
 	called := make(chan struct{}, 1)
-	b := &installed{cfg: Config{ResolvePrincipal: func(context.Context, Caller) (*Principal, error) { called <- struct{}{}; return nil, nil }}}
+	b := &installed{Baton: &Baton{cfg: Config{ResolvePrincipal: func(context.Context, Caller) (*Principal, error) { called <- struct{}{}; return nil, nil }}}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	b.resolveCaller(ctx, func() Caller { return Caller{} })

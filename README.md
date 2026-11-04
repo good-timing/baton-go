@@ -93,9 +93,32 @@ handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return
 	&mcp.StreamableHTTPOptions{Stateless: true})
 ```
 
-**Do not call `Install` per request.** Each `Install` starts its own sender, which runs until its `Close`, so a server built and installed per request leaks one per request.
+**Do not call `Install` per request.** Each `Install` starts its own sender, which runs until its `Close`, so a server built and installed per request leaks one per request. Use `New` and `Wrap` instead (next section).
 
 When the client sends no `Mcp-Session-Id`, each request is its own session. Signals that need several calls in one session, such as a retry loop, do not fire across requests. To see one person's requests together, return a principal from `ResolvePrincipal` ([Who is calling](#who-is-calling)).
+
+## Servers built per request
+
+If your handler builds a new `*mcp.Server` for each request or session, make one `Baton` at startup and wrap each server:
+
+```go
+b, err := baton.New(baton.Config{DSN: os.Getenv("BATON_DSN")})
+if err != nil {
+	log.Fatal(err) // a config that is not valid
+}
+defer b.Close(context.Background())
+
+handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+	s := newServer() // your AddTool lines
+	b.Wrap(s)
+	return s
+}, &mcp.StreamableHTTPOptions{Stateless: true})
+```
+
+- Every wrapped server shares one sender and one sink, which `b.Close` closes.
+- `Wrap` never fails a request. It returns an error only for a nil server. A server already wrapped is skipped, so go-sdk asking for the same server twice is safe.
+- Pass your own middleware in `Config.Middleware`, as with `Install`. `Wrap` adds it to each server once, even when Baton records nothing. That happens with a config error from `New`, with no DSN, `Sink`, `VendorID` or `TenantID`, with `BATON_DISABLED=1`, or after `Close`. Do not add it again.
+- `Install(server, cfg)` is the one-server form; its handle's `Close` closes its sender.
 
 ## What leaves your server
 
@@ -173,8 +196,6 @@ The switch belongs to whoever RUNS the server: your user for a server you distri
 None of it blocks the quickstart above.
 
 - No library API: only a go-sdk `*mcp.Server` is wrapped.
-- One `Install` per server. A server built per request needs one shared
-  Baton, which is not here yet (see "Do not call `Install` per request").
 - Capture settings come from `Config` only; the Console's settings are not
   read.
 

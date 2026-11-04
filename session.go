@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"weak"
 
@@ -65,6 +66,9 @@ func mintSessionID() string { return "sdk-" + uuid7() }
 // collected.
 type sessions struct {
 	fallback string
+	// fallbackSeq numbers the fallback session here, not in the Baton's
+	// shared counter, so a server per request leaves no entry behind.
+	fallbackSeq atomic.Int64
 	// ioConnType is go-sdk's unexported stdio and in-memory connection type,
 	// taken from the probe's connection; nil if the probe failed.
 	ioConnType reflect.Type
@@ -145,6 +149,7 @@ func mcpConn(conn *mcp.ServerSession) reflect.Value {
 type sequencer struct {
 	counts *lru[string, int64]
 	clock  microClock
+	now    func() int64
 }
 
 // microClock numbers by the time in microseconds, at least one more each call.
@@ -161,7 +166,7 @@ func (c *microClock) next() int64 {
 }
 
 func newSequencer() *sequencer {
-	return &sequencer{counts: newLRU[string, int64](sessionCap)}
+	return &sequencer{counts: newLRU[string, int64](sessionCap), now: func() int64 { return time.Now().UnixMicro() }}
 }
 
 func (s *sequencer) next(sess callSession) int64 {
@@ -171,7 +176,7 @@ func (s *sequencer) next(sess callSession) int64 {
 	return s.counts.update(sess.id, func(prev int64) int64 {
 		n := prev + 1
 		if sess.origin == "observed" {
-			n = max(n, time.Now().UnixMicro())
+			n = max(n, s.now())
 		}
 		return n
 	})

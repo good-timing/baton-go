@@ -662,7 +662,7 @@ func (b *installed) emit(cc callContext, eventType string, payload any) {
 		TenantID:          b.tenantID,
 		VendorID:          b.vendorID,
 		SessionID:         cc.session.id,
-		SequenceNumber:    b.seq.next(cc.session),
+		SequenceNumber:    b.sequence(cc.session),
 		CapturedAt:        time.Now().UTC().Format(time.RFC3339Nano),
 		ConsentToken:      b.cfg.ConsentToken,
 		SDKVersion:        sdkVersion,
@@ -677,6 +677,13 @@ func (b *installed) emit(cc callContext, eventType string, payload any) {
 		EventType:         eventType,
 		Payload:           payload,
 	})
+}
+
+func (b *installed) sequence(sess callSession) int64 {
+	if sess.id == b.sessions.fallback {
+		return b.sessions.fallbackSeq.Add(1)
+	}
+	return b.seq.next(sess)
 }
 
 // lastSurface is the tool list the last snapshot was checked against, so an
