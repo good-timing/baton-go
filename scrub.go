@@ -47,7 +47,7 @@ var scrubRules = []scrubRule{
 	rule("sk_key", `\bsk-[A-Za-z0-9_\-]{20,}\b`, contains("sk-")),
 	rule("aws_key", `\bAKIA[0-9A-Z]{16}\b`, contains("AKIA")),
 	rule("email", `\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b`, contains("@")),
-	rule("phone", `\b(?:\+?1[`+wsChars+`.\-]?)?\(?\d{3}\)?[`+wsChars+`.\-]?\d{3}[`+wsChars+`.\-]?\d{4}\b`, digitRun(4)),
+	rule("phone", `\b(?:\+?1[`+wsChars+`.\-]?)?\(?\d{3}\)?[`+wsChars+`.\-]?\d{3}[`+wsChars+`.\-]?\d{4}\b`, hasPhoneShape),
 }
 
 var (
@@ -87,6 +87,63 @@ func digitRun(n int) func(string) bool {
 		}
 		return false
 	}
+}
+
+// hasPhoneShape is whether s holds the phone pattern's digits: 3, an optional
+// ")" and separator, 3, an optional separator, then 4 that end a word. Each
+// optional part is taken when present, as a digit can never stand in for it.
+func hasPhoneShape(s string) bool {
+	for i := 0; i+10 <= len(s); i++ {
+		j, ok := digits(s, i, 3)
+		if !ok {
+			continue
+		}
+		if s[j] == ')' {
+			j++
+		}
+		j += phoneSeparator(s, j)
+		if j, ok = digits(s, j, 3); !ok {
+			continue
+		}
+		j += phoneSeparator(s, j)
+		if j, ok = digits(s, j, 4); ok && (j == len(s) || !isWordByte(s[j])) {
+			return true
+		}
+	}
+	return false
+}
+
+// digits is the index after n ASCII digits at s[i], if they are there.
+func digits(s string, i, n int) (int, bool) {
+	if i+n > len(s) {
+		return i, false
+	}
+	for k := i; k < i+n; k++ {
+		if s[k] < '0' || s[k] > '9' {
+			return i, false
+		}
+	}
+	return i + n, true
+}
+
+// isWordByte is RE2's \w, which is ASCII only.
+func isWordByte(c byte) bool {
+	return c == '_' || '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
+}
+
+// phoneSeparator is the byte length of a phone separator at s[i], or 0.
+func phoneSeparator(s string, i int) int {
+	if i >= len(s) {
+		return 0
+	}
+	switch s[i] {
+	case ' ', '\t', '\n', '\r', '\f', '.', '-':
+		return 1
+	}
+	if strings.HasPrefix(s[i:], "\u00a0") {
+		return 2
+	}
+	return 0
 }
 
 func luhnValid(digits string) bool {

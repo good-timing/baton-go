@@ -18,6 +18,7 @@ func scrubStringFullScan(s string) string {
 
 var (
 	helloText = strings.Repeat("hello ", 51200/6+1)[:51200]
+	digitText = strings.Repeat("48213 9921 1299.50 2026 11 03 77 ", 51200/33+1)[:51200]
 	mixedText = strings.Repeat(`{"id": 48213, "name": "order 2026-11-03", "owner": "ops team", "total": 1299.50, "note": "shipped via UPS"}, `, 51200/100+1)[:51200]
 )
 
@@ -30,6 +31,7 @@ var nearMisses = []string{
 	"41111111111111112", "411111111111 1111", "",
 	"555\u0661234567", "555-123-456\u0661", "be\u0430rer abcdefghijklmnopqrstuv", "\xffeyJa.b.c\xff",
 	"\xffBearer abcdefghijklmnopqrstuv", "a\xff@b.co", "411111111111111\u06611",
+	"555\u00a0123\u00a04567", "(555)123.4567", "555-123-4567x", "555-123-4567_", "5551234567",
 }
 
 // matchedBy is one input each rule's pattern matches, by replacement.
@@ -79,7 +81,7 @@ func specCaseStrings(tb testing.TB) []string {
 
 func TestScrubStringMatchesFullScan(t *testing.T) {
 	inputs := append(specCaseStrings(t), precheckInputs()...)
-	inputs = append(inputs, helloText, mixedText, mixedText+" Bearer abcdefghijklmnopqrstuv a@b.co 4111111111111111")
+	inputs = append(inputs, helloText, mixedText, digitText, digitText+"555 123 4567", mixedText+" Bearer abcdefghijklmnopqrstuv a@b.co 4111111111111111")
 	for _, in := range inputs {
 		if got, want := scrubString(in), scrubStringFullScan(in); got != want {
 			t.Errorf("%q:\ngot  %q\nwant %q", in, got, want)
@@ -110,6 +112,9 @@ func TestEachPrecheckSkipsOnlyTextItsPatternCannotMatch(t *testing.T) {
 		if r.mayMatch(helloText) {
 			t.Errorf("%s: mayMatch is true for text it cannot match", r.replacement)
 		}
+		if r.replacement == "[REDACTED:phone]" && r.mayMatch(digitText) {
+			t.Error("phone: mayMatch is true for numbers with no phone's digit groups")
+		}
 	}
 	if !ccMayMatch("4111111111111111") || ccMayMatch(mixedText) {
 		t.Error("cc: ccMayMatch must be true for 16 digits and false for text without 13 in a row")
@@ -129,7 +134,7 @@ func TestScrubStringSkipsAPatternWhosePrecheckSaysNo(t *testing.T) {
 }
 
 func BenchmarkScrubString50KB(b *testing.B) {
-	for _, text := range []struct{ name, s string }{{"hello", helloText}, {"mixed", mixedText}} {
+	for _, text := range []struct{ name, s string }{{"hello", helloText}, {"mixed", mixedText}, {"digits", digitText}} {
 		b.Run(text.name+"/full_scan", func(b *testing.B) {
 			for b.Loop() {
 				scrubStringFullScan(text.s)
