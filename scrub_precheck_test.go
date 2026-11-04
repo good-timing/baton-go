@@ -116,6 +116,18 @@ func TestEachPrecheckSkipsOnlyTextItsPatternCannotMatch(t *testing.T) {
 	}
 }
 
+func TestScrubStringSkipsAPatternWhosePrecheckSaysNo(t *testing.T) {
+	rules, cc := scrubRules, ccMayMatch
+	t.Cleanup(func() { scrubRules, ccMayMatch = rules, cc })
+	never := func(string) bool { return false }
+	scrubRules = []scrubRule{rule("any", `.`, never)}
+	ccMayMatch = never
+
+	if got := scrubString("4111111111111111"); got != "4111111111111111" {
+		t.Errorf("got %q: a pattern ran though its precheck said no", got)
+	}
+}
+
 func BenchmarkScrubString50KB(b *testing.B) {
 	for _, text := range []struct{ name, s string }{{"hello", helloText}, {"mixed", mixedText}} {
 		b.Run(text.name+"/full_scan", func(b *testing.B) {
