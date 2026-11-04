@@ -132,17 +132,22 @@ type httpSink struct {
 	reportsRefused bool
 }
 
+// collectorClient follows no redirect: a redirect is not the collector's answer.
+func collectorClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout:       timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+}
+
 func newHTTPSink(origin, key string) *httpSink {
 	ctx, cancel := context.WithCancel(context.Background())
 	reportCtx, cancelReports := context.WithCancel(ctx)
 	s := &httpSink{
 		origin: origin,
 		auth:   "Bearer " + key,
-		client: &http.Client{
-			Timeout: requestTimeout,
-			// Following a redirect turns the POST into a GET without the events.
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		},
+		// Following a redirect turns the POST into a GET without the events.
+		client:        collectorClient(requestTimeout),
 		wake:          make(chan struct{}, 1),
 		flushes:       make(chan chan struct{}),
 		stop:          make(chan struct{}),

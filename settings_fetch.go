@@ -27,12 +27,11 @@ type settingsReader struct {
 	refresh             time.Duration
 	client              *http.Client
 
-	doc      atomic.Pointer[settingsDocument]
-	etag     string
-	warned   sync.Once
-	stopOnce sync.Once
-	cancel   context.CancelFunc
-	done     chan struct{}
+	doc    atomic.Pointer[settingsDocument]
+	etag   string
+	warned sync.Once
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 func newSettingsReader(origin, key, tenantID, vendorID string, refresh time.Duration) *settingsReader {
@@ -41,10 +40,8 @@ func newSettingsReader(origin, key, tenantID, vendorID string, refresh time.Dura
 		auth:     "Bearer " + key,
 		tenantID: tenantID,
 		refresh:  refresh,
-		client: &http.Client{
-			Timeout:       settingsTimeout,
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		},
+		// A redirect would carry the key to another origin.
+		client: collectorClient(settingsTimeout),
 	}
 }
 
@@ -79,7 +76,7 @@ func (r *settingsReader) stop(ctx context.Context) {
 	if r == nil || r.cancel == nil {
 		return
 	}
-	r.stopOnce.Do(r.cancel)
+	r.cancel()
 	select {
 	case <-r.done:
 	case <-ctx.Done():
@@ -108,7 +105,11 @@ func (r *settingsReader) readOnce(ctx context.Context) {
 		slog.Debug("baton: reading capture settings failed", "error", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		// Reading to the end lets the connection be reused.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		resp.Body.Close()
+	}()
 	switch resp.StatusCode {
 	case http.StatusNoContent:
 		r.doc.Store(nil)

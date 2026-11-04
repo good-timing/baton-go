@@ -216,12 +216,12 @@ func (b *installed) resolveCaller(ctx context.Context, caller func() Caller) (w 
 		return who{}
 	}
 	w.principal = wireIdentity(a.p.ID, a.p.DisplayName, a.p.Hashed)
-	labels := a.p.Labels
+	var orgLabels []string
 	if o := a.p.Organization; o != nil {
 		w.org = wireIdentity(o.ID, o.DisplayName, o.Hashed)
-		labels = slices.Concat(labels, o.Labels)
+		orgLabels = o.Labels
 	}
-	w.labels = cleanLabels(labels)
+	w.labels = cleanLabels(a.p.Labels, orgLabels)
 	return w
 }
 
@@ -238,14 +238,16 @@ const (
 
 // cleanLabels keeps the usable labels in order, without repeats, at most
 // labelsCap; nil when none are left, as "labels" is never [] (SPEC §11.4).
-func cleanLabels(given []string) []string {
+func cleanLabels(given ...[]string) []string {
 	var out []string
-	for _, l := range given {
-		if len(out) == labelsCap {
-			break
-		}
-		if usableIdentityText(l) && utf8.RuneCountInString(l) <= labelLength && !slices.Contains(out, l) {
-			out = append(out, l)
+	for _, list := range given {
+		for _, l := range list {
+			if len(out) == labelsCap {
+				return out
+			}
+			if usableIdentityText(l) && utf8.RuneCountInString(l) <= labelLength && !slices.Contains(out, l) {
+				out = append(out, l)
+			}
 		}
 	}
 	return out

@@ -94,7 +94,7 @@ func digitRun(n int) func(string) bool {
 // optional part is taken when present, as a digit can never stand in for it.
 func hasPhoneShape(s string) bool {
 	for i := 0; i+10 <= len(s); i++ {
-		j, ok := digits(s, i, 3)
+		j, ok := digitsAt(s, i, 3)
 		if !ok {
 			continue
 		}
@@ -102,19 +102,19 @@ func hasPhoneShape(s string) bool {
 			j++
 		}
 		j += phoneSeparator(s, j)
-		if j, ok = digits(s, j, 3); !ok {
+		if j, ok = digitsAt(s, j, 3); !ok {
 			continue
 		}
 		j += phoneSeparator(s, j)
-		if j, ok = digits(s, j, 4); ok && (j == len(s) || !isWordByte(s[j])) {
+		if j, ok = digitsAt(s, j, 4); ok && (j == len(s) || !isWordByte(s[j])) {
 			return true
 		}
 	}
 	return false
 }
 
-// digits is the index after n ASCII digits at s[i], if they are there.
-func digits(s string, i, n int) (int, bool) {
+// digitsAt is the index after n ASCII digits at s[i], if they are there.
+func digitsAt(s string, i, n int) (int, bool) {
 	if i+n > len(s) {
 		return i, false
 	}

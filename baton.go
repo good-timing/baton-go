@@ -20,7 +20,6 @@ type Baton struct {
 	vendorID       string
 	tenantID       string
 	sink           sink
-	requiredNames  []string
 	seq            *sequencer
 	sentSurfaces   *lru[string, struct{}]
 	serverName     string
@@ -111,7 +110,7 @@ func (b *Baton) Wrap(server *mcp.Server) error {
 		// A request on this server must not run before the vendor's
 		// middleware, which may be their auth, is on it.
 		<-added
-		if !b.claimed(server) {
+		if !b.claimedBy(server, added) {
 			// The first Wrap panicked and added nothing
 			// (TestAWrapWaitingOnOneThatPanicsWrapsTheServer).
 			return b.Wrap(server)
@@ -140,11 +139,11 @@ func (b *Baton) Wrap(server *mcp.Server) error {
 	return nil
 }
 
-func (b *Baton) claimed(server *mcp.Server) bool {
+// claimedBy is whether the Wrap that made added still holds server's claim.
+func (b *Baton) claimedBy(server *mcp.Server, added chan struct{}) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	_, ok := b.wrapped[weak.Make(server)]
-	return ok
+	return b.wrapped[weak.Make(server)] == added
 }
 
 // claim records server, and reports whether it was new to b and whether b

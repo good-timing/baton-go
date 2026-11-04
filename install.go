@@ -348,16 +348,12 @@ func configure(impl *mcp.Implementation, opts *mcp.ServerOptions, cfg Config) (*
 		serverName:     impl.Name,
 		serverInfo:     jsonValue(impl),
 		customScrubber: customScrubber,
-		requiredNames:  []string{},
 		seq:            newSequencer(),
 		sentSurfaces:   newLRU[string, struct{}](sentSurfacesCap),
 		wrapped:        map[weak.Pointer[mcp.Server]]chan struct{}{},
 	}
 	if opts != nil {
 		b.instructions = opts.Instructions
-	}
-	if cfg.IntentParamMode == IntentParamRequired {
-		b.requiredNames = []string{userGoalParam}
 	}
 	if cfg.ReportMode != ReportOn && cfg.AnnotationToolName != "" {
 		slog.Warn(`baton: AnnotationToolName has no effect with ReportMode "off", because no annotation tool is served`,

@@ -366,16 +366,6 @@ func TestASecondWrapWaitsForTheFirstToAddTheVendorsMiddleware(t *testing.T) {
 	}
 }
 
-func startsIn(sink *memorySink) int {
-	n := 0
-	for _, ev := range sink.all() {
-		if ev.EventType == "tool_call_start" {
-			n++
-		}
-	}
-	return n
-}
-
 func TestAWrapThatPanicsLeavesTheServerUnwrapped(t *testing.T) {
 	b, sink := newTestBaton(t, Config{})
 	var attaches atomic.Int32
@@ -398,7 +388,7 @@ func TestAWrapThatPanicsLeavesTheServerUnwrapped(t *testing.T) {
 		t.Fatal(err)
 	}
 	call(t, connect(t, server), "lookup", map[string]any{"name": "a"})
-	if startsIn(sink) != 1 {
+	if len(ofType(sink.all(), "tool_call_start")) != 1 {
 		t.Error("a second Wrap after a panic did not add Baton")
 	}
 }
@@ -426,7 +416,7 @@ func TestAWrapWaitingOnOneThatPanicsWrapsTheServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	call(t, connect(t, server), "lookup", map[string]any{"name": "a"})
-	if startsIn(sink) != 1 {
+	if len(ofType(sink.all(), "tool_call_start")) != 1 {
 		t.Error("the waiting Wrap returned without Baton on the server")
 	}
 }

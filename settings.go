@@ -80,21 +80,23 @@ func (d *settingsDocument) settingsFor(v matchView, vendorID string) callSetting
 // reportsOnForAnyone is whether some caller can get reports, so the
 // instructions point to the report tool.
 func (d *settingsDocument) reportsOnForAnyone(code ReportMode) bool {
-	reachable := make([]callSettings, 0, len(d.audiences)+1)
+	on := func(s callSettings) bool { return cmp.Or(s.reports, code) == ReportOn }
 	for _, a := range d.audiences {
-		reachable = append(reachable, a.settings)
+		if on(a.settings) {
+			return true
+		}
 	}
-	if !slices.ContainsFunc(d.audiences, audience.matchesEveryone) {
-		reachable = append(reachable, d.unmatched)
-	}
-	return slices.ContainsFunc(reachable, func(s callSettings) bool { return cmp.Or(s.reports, code) == ReportOn })
+	return !slices.ContainsFunc(d.audiences, audience.matchesEveryone) && on(d.unmatched)
 }
 
 // shareBucket is SPEC §2.6's bucket: the first 8 bytes of SHA-256 over
 // vendorID, a line feed and key, big-endian, modulo 10000.
 func shareBucket(vendorID, key string) int {
-	sum := sha256.Sum256([]byte(vendorID + "\n" + key))
-	return int(binary.BigEndian.Uint64(sum[:8]) % 10000)
+	h := sha256.New()
+	h.Write([]byte(vendorID))
+	h.Write([]byte{'\n'})
+	h.Write([]byte(key))
+	return int(binary.BigEndian.Uint64(h.Sum(nil)[:8]) % 10000)
 }
 
 // parseSettings is the document in body, or nil when it is not a valid one

@@ -55,9 +55,10 @@ func (b *installed) maybeSnapshot(l listing) {
 			InjectedTools: injected,
 			IntentParam: intentParam{
 				Names:         []string{userGoalParam},
-				RequiredNames: b.requiredNames,
+				RequiredNames: requiredNames(b.cfg.IntentParamMode),
 				Mode:          string(b.cfg.IntentParamMode),
 			},
+			// The Config's value, not the document's (TestTheSnapshotsInstructionsSuffixIsTheCodes).
 			InstructionsSuffix: b.ourInstructions(l, true) != "",
 		},
 	})
@@ -114,4 +115,11 @@ func jsonValue(v any) any {
 		return nil
 	}
 	return out
+}
+
+func requiredNames(mode IntentParamMode) []string {
+	if mode == IntentParamRequired {
+		return []string{userGoalParam}
+	}
+	return []string{}
 }
