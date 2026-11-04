@@ -436,3 +436,40 @@ func rawRequest(ctx context.Context, conn mcp.Connection, n int64, method string
 		}
 	}
 }
+
+func TestABadModeNamesTheFieldAndItsValues(t *testing.T) {
+	impl := &mcp.Implementation{Name: "acme"}
+	for cfg, want := range map[*Config]string{
+		{ResultCaptureMode: "none"}: `baton: Config.ResultCaptureMode is "none"; use one of ["full" "off"]`,
+		{IntentParamMode: "off"}:    `baton: Config.IntentParamMode is "off"; use one of ["required" "optional"]`,
+		{ReportMode: "yes"}:         `baton: Config.ReportMode is "yes"; use one of ["on" "off"]`,
+	} {
+		if _, err := configure(impl, nil, *cfg); err == nil || err.Error() != want {
+			t.Errorf("got %v\nwant %s", err, want)
+		}
+	}
+}
+
+func TestTheSnapshotSendsTheIntentModeAsItsString(t *testing.T) {
+	for mode, want := range map[IntentParamMode]string{"": "required", IntentParamRequired: "required", IntentParamOptional: "optional"} {
+		server, sink := installWithSink(t, Config{IntentParamMode: mode}, addLookup)
+		call(t, connect(t, server), "lookup", map[string]any{"name": "a"})
+		raw, err := json.Marshal(ofType(sink.all(), "surface_snapshot")[0].Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var snap struct {
+			SeamAugmentations struct {
+				IntentParam struct {
+					Mode any `json:"mode"`
+				} `json:"intent_param"`
+			} `json:"seam_augmentations"`
+		}
+		if err := json.Unmarshal(raw, &snap); err != nil {
+			t.Fatal(err)
+		}
+		if got := snap.SeamAugmentations.IntentParam.Mode; got != want {
+			t.Errorf("IntentParamMode %q: intent_param.mode is %#v, want %q", mode, got, want)
+		}
+	}
+}
