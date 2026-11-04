@@ -103,18 +103,40 @@ func (b *Baton) Wrap(server *mcp.Server) error {
 		// A request on this server must not run before the vendor's
 		// middleware, which may be their auth, is on it.
 		<-added
+		if !b.claimed(server) {
+			// The first Wrap panicked and added nothing
+			// (TestAWrapWaitingOnOneThatPanicsWrapsTheServer).
+			return b.Wrap(server)
+		}
 		return nil
 	}
 	defer close(added)
+	// A panic propagates: recovering it would serve requests without the
+	// vendor's middleware. The server is left unclaimed, so a later Wrap
+	// tries again (TestAWrapThatPanicsLeavesTheServerUnwrapped).
+	attached := false
+	defer func() {
+		if !attached {
+			b.forget(weak.Make(server))
+		}
+	}()
 	if b.beforeAttach != nil {
 		b.beforeAttach()
 	}
 	if !recording {
 		addVendorMiddleware(server, b.cfg.Middleware)
-		return nil
+	} else {
+		b.newServer().attach(server)
 	}
-	b.newServer().attach(server)
+	attached = true
 	return nil
+}
+
+func (b *Baton) claimed(server *mcp.Server) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_, ok := b.wrapped[weak.Make(server)]
+	return ok
 }
 
 // claim records server, and reports whether it was new to b and whether b
