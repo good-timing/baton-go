@@ -394,12 +394,12 @@ const slugCap = 30
 
 var collapseHyphens = regexp.MustCompile(`-+`)
 
-// nameTheVendorChose is the server's name, or "" for a default name an MCP
-// library gives a server, which baton-sdk skips for both names too
+// nameTheVendorChose is the server's name, or "" for a blank name or a default
+// name an MCP library gives a server, which baton-sdk skips for both names too
 // (TestALibrarysPlaceholderNameIsNotUsed).
 func nameTheVendorChose(serverName string) string {
 	trimmed := strings.TrimFunc(serverName, isPythonSpace)
-	if lowered := lowerLikePython(trimmed); lowered == "fastmcp" || lowered == "mcp-server" {
+	if lowered := lowerLikePython(trimmed); lowered == "" || lowered == "fastmcp" || lowered == "mcp-server" {
 		return ""
 	}
 	return serverName

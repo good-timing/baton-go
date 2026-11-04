@@ -247,6 +247,8 @@ func TestALibrarysPlaceholderNameIsNotUsed(t *testing.T) {
 		"FastMCP": "", " fastmcp ": "", "MCP-SERVER": "", "\tmcp-server\n": "", "fastmcp\x1f": "",
 		// Only the exact names, as in baton-sdk.
 		"MCP Server": "MCP Server", "fastmcp!": "fastmcp!",
+		// A blank name is no name, as in baton-sdk.
+		"   ": "", "\t\u3000\x1c": "",
 	} {
 		if got := nameTheVendorChose(name); got != want {
 			t.Errorf("%q gave %q, want %q", name, got, want)
@@ -258,6 +260,17 @@ func TestALibrarysPlaceholderNameIsNotUsed(t *testing.T) {
 	installBuiltWith(t, server, impl, nil, Config{ReportMode: "on"})
 	cs := connect(t, server)
 	if got := cs.InitializeResult().Instructions; strings.Contains(got, "FastMCP") || !strings.Contains(got, "acme_annotate") {
+		t.Errorf("instructions = %q", got)
+	}
+}
+
+func TestABlankServerNameNamesTheVendorID(t *testing.T) {
+	impl := &mcp.Implementation{Name: "   "}
+	server := mcp.NewServer(impl, nil)
+	addLookup(server)
+	installBuiltWith(t, server, impl, nil, Config{ReportMode: ReportOn})
+	got := connect(t, server).InitializeResult().Instructions
+	if !strings.Contains(got, "acme_annotate") || strings.Contains(got, `"   "`) || strings.Contains(got, "   ") {
 		t.Errorf("instructions = %q", got)
 	}
 }
