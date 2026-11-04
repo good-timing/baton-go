@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.2
 
 - **A large captured value adds much less time to its tool call.** The
   default scrubber runs a pattern only when the text holds what that pattern
