@@ -15,21 +15,21 @@ import (
 // Baton is one sender and sink shared by every server it wraps, for a process
 // that builds a new server per request. Make one with New at startup.
 type Baton struct {
-	cfg                 Config
-	customScrubber      bool
-	vendorID            string
-	tenantID            string
-	sink                sink
-	userGoalDescription string
-	requiredNames       []string
-	seq                 *sequencer
-	sentSurfaces        *lru[string, struct{}]
-	serverName          string
-	annotateName        string
-	annotate            annotateTool
-	reportPointer       string
-	serverInfo          any
-	instructions        string
+	cfg            Config
+	customScrubber bool
+	vendorID       string
+	tenantID       string
+	sink           sink
+	requiredNames  []string
+	seq            *sequencer
+	sentSurfaces   *lru[string, struct{}]
+	serverName     string
+	annotateName   string
+	annotate       annotateTool
+	reportPointer  string
+	serverInfo     any
+	instructions   string
+	settings       *settingsReader
 	// capabilities is from the first initialize or server/discover answer:
 	// go-sdk computes them from what is registered and does not export them.
 	capabilities atomic.Pointer[capabilities]
@@ -80,9 +80,17 @@ func New(impl *mcp.Implementation, opts *mcp.ServerOptions, cfg Config) (*Baton,
 		return inertBaton(cfg.Middleware), err
 	}
 	if openSink != nil {
-		b.sink = openSink()
+		b.open(openSink)
 	}
 	return b, nil
+}
+
+// open starts sending, and reading the Console's settings when Config asks.
+func (b *Baton) open(openSink func() sink) {
+	b.sink = openSink()
+	if b.settings != nil {
+		b.settings.start()
+	}
 }
 
 // Wrap adds Baton and Config.Middleware to server; call it after the
@@ -181,5 +189,6 @@ func (b *Baton) Close(ctx context.Context) {
 	b.mu.Lock()
 	b.closed = true
 	b.mu.Unlock()
+	b.settings.stop(ctx)
 	b.sink.close(ctx)
 }

@@ -13,7 +13,7 @@ import (
 // paused round is not an end (TestAPausedCallIsOneCall, TestAPausedRequestIsOne).
 func (b *installed) around(ctx context.Context, req mcp.Request, kind string,
 	start func(cc *callContext, resuming bool),
-	serve func() (mcp.Result, error),
+	serve func(cc callContext) (mcp.Result, error),
 	end func(cc callContext, res mcp.Result, err error, elapsed int64),
 ) (mcp.Result, error) {
 	var (
@@ -28,7 +28,7 @@ func (b *installed) around(ctx context.Context, req mcp.Request, kind string,
 	})
 
 	began := time.Now()
-	res, err := serve()
+	res, err := serve(cc)
 	elapsed := time.Since(began).Milliseconds()
 
 	if ready && !paused(res) {
@@ -47,7 +47,7 @@ var lifecycleKinds = map[string]string{
 
 // lifecycle records a listing, prompt get or resource read (SPEC §11.4.4,
 // §11.4.5).
-func (b *installed) lifecycle(ctx context.Context, req mcp.Request, kind string, serve func() (mcp.Result, error)) (mcp.Result, error) {
+func (b *installed) lifecycle(ctx context.Context, req mcp.Request, kind string, serve func(cc callContext) (mcp.Result, error)) (mcp.Result, error) {
 	var subject map[string]any
 	return b.around(ctx, req, kind,
 		func(cc *callContext, resuming bool) {

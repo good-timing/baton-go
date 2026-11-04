@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **Settings from the Console (experimental).** `Config.Settings:
+  baton.SettingsConsole` reads the capture settings saved on the Console
+  (SPEC §2.6), with the DSN's key, in the background: once at start, then
+  every `Config.SettingsRefresh` (60 seconds by default, at least 15). A call
+  never waits for a read. `results` applies per call, `goal` and `reports`
+  per `tools/list`; with `reports` off the report tool is left out of that
+  caller's list and still accepts a report. `ReportMode` is `ReportOn` under
+  console settings unless you set it. One `New` reads once for every server
+  it wraps. Each event carries `capture`, the settings' version and audience.
+  `SettingsConsole` with `Sink`, `VendorID` or `TenantID`, a `Settings` value
+  that is not allowed, and a `SettingsRefresh` under 15 seconds are config
+  errors. The same document gives the same audience as in `baton-sdk`.
+- **Labels (experimental).** `Principal.Labels` and `Organization.Labels`
+  name the groups a caller is in, for the Console's settings to match. They
+  ride each event in the new `Event.Labels`, not scrubbed.
+- **Fixed:** a `Wrap` that panicked left its server marked as wrapped, so
+  later `Wrap`s of it added nothing, and one already waiting returned as if
+  the server were wrapped. The panic still propagates; the next `Wrap` adds
+  Baton.
+- **Fixed:** a server name of only white space became the display name. It
+  now counts as no name, as in `baton-sdk`, and the vendor id is used.
+- **Faster:** the phone pattern's precheck now looks for its digit groups,
+  so 50 KB of digit-heavy text takes about 0.17 ms to scrub, not 1.8 ms.
 - **Breaking: two `Config` fields are renamed,** to the names Python and
   TypeScript use. This breaks at compile time:
 

@@ -1,6 +1,6 @@
 # baton-go
 
-**Stable from v1.0.0.** This module follows [semantic versioning](https://semver.org). A breaking change means a v2, with a `/v2` module path. The public API is every exported identifier in this package.
+**Stable from v1.0.0.** This module follows [semantic versioning](https://semver.org). A breaking change means a v2, with a `/v2` module path. The public API is every exported identifier in this package, except these, which are **experimental** and may change in a minor release: `Config.Settings`, `Config.SettingsRefresh`, `SettingsMode` and its values, `Principal.Labels`, `Organization.Labels`, `Event.Labels`, `Event.Capture` and `CaptureObserved`.
 
 baton-go v1.0 covers the MCP path only: a go-sdk `*mcp.Server`. The library API (SPEC §5.6) is not in 1.0; it will come later as an addition. The events Baton sends only grow: nothing is removed or changes meaning, except what SPEC marks experimental. See [SPEC §13, "Stability from 1.0"](https://github.com/good-timing/baton/blob/main/docs/SPEC.md#stability-from-10).
 
@@ -181,6 +181,32 @@ If your users belong to your customers' companies, return the company too. Each 
 
 **What is still sent:** the tool name, the duration, whether the call failed, and the `error_type`, which for a returned `error` is its Go type name, such as `*acme.NotFoundError`. So failure detection and timing keep working. Two messages are kept too: the message of a call to a tool that does not exist (when it is tagged `unknown_tool`, below), and a message you return as a `*baton.PublicError`, which marks it safe to send. The message of a failed listing, prompt or resource request is kept as well, and `Install` warns once about this when the mode is off. It can include text your handler returned, so return a message that names the resource, not its contents.
 
+## Settings from the Console
+
+*Experimental: may change in a minor release.*
+
+`Settings: baton.SettingsConsole` reads the capture settings saved on the Console, so you can change them without a deploy, and they can differ by label, client or a share of your callers:
+
+```go
+baton.Install(server, impl, opts, baton.Config{
+	DSN:      "https://baton_pk_...@baton.goodtiming.ai/ten_.../your-vendor",
+	Settings: baton.SettingsConsole,
+	ResolvePrincipal: func(ctx context.Context, c baton.Caller) (*baton.Principal, error) {
+		return &baton.Principal{ID: c.Header.Get("X-User"), Labels: []string{"beta"}}, nil
+	},
+})
+```
+
+- It needs a DSN, and reads with the DSN's key. With `Sink`, `VendorID` or `TenantID` it is an error.
+- Baton reads the settings once in the background when it starts, then every `SettingsRefresh`: 60 seconds when zero, and at least 15. A call never waits for a read. Until the first read succeeds, and when nothing is saved, the values in your `Config` apply. A failed or unreadable answer keeps the settings Baton holds.
+- `results` applies from the next call. `goal` and `reports` apply from the next `tools/list`. With `reports` off for a caller, the report tool is left out of their tool list, but it still accepts a report.
+- `ReportMode` is `baton.ReportOn` unless you set it, so the Console can turn reports off for some callers. With `ReportMode: baton.ReportOff` there is no report tool to turn on.
+- The server instructions go out once per connection, so they point to the report tool while some caller can get it.
+- One `New` reads once for every server it wraps. `Close` stops the reads.
+- Each event says which settings it ran under in `capture`: the settings' version and the matched audience.
+
+**Labels** are your names for the groups a caller is in, such as `beta` or one unguessable key per customer, for the Console's settings to match. Return them in `Principal.Labels` and `Organization.Labels`. A `Principal` with labels and no `ID` sends the labels alone. They ride each event in `labels`, at most 20 of up to 64 characters each. They are sent as you return them, not scrubbed, so never put a raw id in one.
+
 ## Failures your handler never saw
 
 A call to a tool that does not exist never reaches a handler. Baton still records it, as `tool_call_error` with `failure_kind: "unknown_tool"`. To know a tool is missing, Baton lists your tools on each call; if that listing fails, the event has no `failure_kind`.
@@ -208,8 +234,6 @@ The switch belongs to whoever RUNS the server: your user for a server you distri
 None of it blocks the quickstart above.
 
 - No library API (SPEC §5.6): only a go-sdk `*mcp.Server` is wrapped.
-- The Console's settings (experimental in SPEC §2.6) are not read. Capture
-  settings come from `Config` only.
 - The Console's setup has no recipe yet for a server built per request.
   Follow [Servers built per request](#servers-built-per-request).
 

@@ -1,6 +1,7 @@
 package baton
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -30,7 +31,7 @@ func (b *installed) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 				guard("instructions", func() {
 					if instructions := instructionsOf(res); instructions != nil {
 						if l, ok := b.vendorTools(ctx, next, req); ok {
-							b.addInstructions(instructions, l)
+							b.addInstructions(instructions, l, b.reportsReachable())
 						}
 					}
 				})
@@ -42,9 +43,9 @@ func (b *installed) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 			}
 		}
 		if kind, ok := lifecycleKinds[method]; ok {
-			serve := func() (mcp.Result, error) { return next(ctx, method, req) }
+			serve := func(callContext) (mcp.Result, error) { return next(ctx, method, req) }
 			if method == "tools/list" {
-				serve = func() (mcp.Result, error) { return b.listTools(ctx, next, req) }
+				serve = func(cc callContext) (mcp.Result, error) { return b.listTools(ctx, next, req, cc.settings) }
 			}
 			return b.lifecycle(ctx, req, kind, serve)
 		}
@@ -139,12 +140,12 @@ func (b *installed) anyDeclaresUserGoal(l listing) bool {
 }
 
 // ourInstructions is Baton's paragraph: the report pointer when Baton serves
-// the report tool, then the subagent sentence unless a tool declares its own
-// user_goal, where the sentence would send the turn number into the vendor's
-// argument.
-func (b *installed) ourInstructions(l listing) string {
+// the report tool and reports reach someone, then the subagent sentence
+// unless a tool declares its own user_goal, where the sentence would send the
+// turn number into the vendor's argument.
+func (b *installed) ourInstructions(l listing, reports bool) string {
 	pointer := ""
-	if b.servesAnnotate(l) {
+	if reports && b.servesAnnotate(l) {
 		pointer = b.reportPointer
 	}
 	if b.anyDeclaresUserGoal(l) {
@@ -155,8 +156,8 @@ func (b *installed) ourInstructions(l listing) string {
 
 // addInstructions puts Baton's paragraph after the vendor's own text in this
 // response (SPEC §5.1.2).
-func (b *installed) addInstructions(instructions *string, l listing) {
-	ours := b.ourInstructions(l)
+func (b *installed) addInstructions(instructions *string, l listing, reports bool) {
+	ours := b.ourInstructions(l, reports)
 	if ours == "" {
 		return
 	}
@@ -214,11 +215,20 @@ func (b *installed) servesAnnotate(l listing) bool {
 	return true
 }
 
-func (b *installed) listTools(ctx context.Context, next mcp.MethodHandler, req mcp.Request) (mcp.Result, error) {
+// reportsReachable is whether some caller can get the report tool: with no
+// settings document held, the Config's ReportMode decides (SPEC §2.6). The
+// instructions go out once per connection, so they are the same for every
+// caller.
+func (b *installed) reportsReachable() bool {
+	doc := b.settings.document()
+	return doc == nil || doc.reportsOnForAnyone(b.cfg.ReportMode)
+}
+
+func (b *installed) listTools(ctx context.Context, next mcp.MethodHandler, req mcp.Request, cs callSettings) (mcp.Result, error) {
 	res, err := next(ctx, "tools/list", req)
 	if r, ok := res.(*mcp.ListToolsResult); ok && err == nil {
 		var listed *mcp.ListToolsResult
-		guard("tools/list", func() { listed = b.augmentToolList(ctx, next, req, r) })
+		guard("tools/list", func() { listed = b.augmentToolList(ctx, next, req, r, cs) })
 		if listed != nil {
 			return listed, nil
 		}
@@ -226,15 +236,24 @@ func (b *installed) listTools(ctx context.Context, next mcp.MethodHandler, req m
 	return res, err
 }
 
+// listedKey is a tool as listed under one goal setting.
+type listedKey struct {
+	tool *mcp.Tool
+	goal IntentParamMode
+}
+
 // augmentToolList returns a copy of the page with user_goal in each schema,
-// and the annotate tool on the last page.
-func (b *installed) augmentToolList(ctx context.Context, next mcp.MethodHandler, req mcp.Request, r *mcp.ListToolsResult) *mcp.ListToolsResult {
+// and the annotate tool on the last page, under the caller's goal and reports
+// settings (SPEC §2.6). With reports off, the annotate tool is left out of
+// the list but still answers.
+func (b *installed) augmentToolList(ctx context.Context, next mcp.MethodHandler, req mcp.Request, r *mcp.ListToolsResult, cs callSettings) *mcp.ListToolsResult {
+	goal := cmp.Or(cs.goal, b.cfg.IntentParamMode)
 	out := *r
 	out.Tools = make([]*mcp.Tool, 0, len(r.Tools)+1)
 	for _, t := range r.Tools {
-		out.Tools = append(out.Tools, b.listed.getOrPut(t, func() *mcp.Tool { return b.withUserGoal(t) }))
+		out.Tools = append(out.Tools, b.listed.getOrPut(listedKey{t, goal}, func() *mcp.Tool { return b.withUserGoal(t, goal) }))
 	}
-	if r.NextCursor != "" || b.annotateName == "" {
+	if r.NextCursor != "" || b.annotateName == "" || cmp.Or(cs.reports, b.cfg.ReportMode) == ReportOff {
 		return &out
 	}
 	// A first page with no next page is the whole list.
@@ -250,7 +269,7 @@ func (b *installed) augmentToolList(ctx context.Context, next mcp.MethodHandler,
 
 // withUserGoal is t as listed: a copy with user_goal in its schema. go-sdk
 // hands out its registry's own *Tool values, so they are never edited.
-func (b *installed) withUserGoal(t *mcp.Tool) *mcp.Tool {
+func (b *installed) withUserGoal(t *mcp.Tool, goal IntentParamMode) *mcp.Tool {
 	copied := *t
 	schema, ok := jsonValue(t.InputSchema).(map[string]any)
 	if !ok {
@@ -268,13 +287,10 @@ func (b *installed) withUserGoal(t *mcp.Tool) *mcp.Tool {
 	if _, native := props[userGoalParam]; native {
 		return &copied
 	}
-	props[userGoalParam] = map[string]any{"type": "string", "description": b.userGoalDescription}
-	if len(b.requiredNames) > 0 {
+	props[userGoalParam] = map[string]any{"type": "string", "description": userGoalDescription(goal)}
+	if goal == IntentParamRequired {
 		required, _ := schema["required"].([]any)
-		for _, name := range b.requiredNames {
-			required = append(required, name)
-		}
-		schema["required"] = required
+		schema["required"] = append(required, userGoalParam)
 	}
 	return &copied
 }
@@ -285,6 +301,7 @@ type callContext struct {
 	who         who
 	runtimeMeta map[string]any
 	client      *ClientObserved
+	settings    callSettings
 }
 
 func (b *installed) newCallContext(ctx context.Context, r mcp.Request) callContext {
@@ -305,12 +322,27 @@ func (b *installed) newCallContext(ctx context.Context, r mcp.Request) callConte
 		cc.who = b.resolveCaller(ctx, func() Caller { return callerOf(r, header, token, meta) })
 	}
 	cc.client = b.observeClient(meta, session, header)
+	if doc := b.settings.document(); doc != nil {
+		// A failure here leaves the Config's values for this call.
+		guard("capture settings", func() { cc.settings = doc.settingsFor(cc.matchView(), b.vendorID) })
+	}
 	if len(meta) > 0 {
 		meta, _ := jsonValue(map[string]any(meta)).(map[string]any)
 		// Rounded before the vendor's scrubber, so NoScrub keeps the rounding.
 		cc.runtimeMeta, _ = b.scrubOrNil(roundMetaCoordinates(meta), "runtime_meta").(map[string]any)
 	}
 	return cc
+}
+
+func (cc callContext) matchView() matchView {
+	v := matchView{labels: cc.who.labels}
+	if cc.client != nil && cc.client.Info != nil {
+		v.client = cc.client.Info.Name
+	}
+	if id := cmp.Or(cc.who.principal, cc.who.org); id != nil {
+		v.shareKey = id.ID
+	}
+	return v
 }
 
 // callerOf copies what the hook may read, so a hook still running after its
@@ -406,14 +438,14 @@ func (b *installed) toolCall(ctx context.Context, next mcp.MethodHandler, method
 		err error
 	)
 	if !b.placesVendorMiddleware() {
-		res, err = b.around(ctx, r, "tool_call", sendStart, func() (mcp.Result, error) { return next(ctx, method, r) }, sendEnd(nil))
+		res, err = b.around(ctx, r, "tool_call", sendStart, func(callContext) (mcp.Result, error) { return next(ctx, method, r) }, sendEnd(nil))
 	} else {
 		// A call the vendor's middleware lets through is recorded inside it,
 		// with the ctx it passed on, so ResolvePrincipal sees what its auth
 		// set (TestResolvePrincipalSeesWhatTheVendorsMiddlewareSet). Here,
 		// only a call it stopped.
 		pass := &passage{run: func(ctx context.Context, serve func(context.Context) (mcp.Result, error)) (mcp.Result, error) {
-			return b.around(ctx, r, "tool_call", sendStart, func() (mcp.Result, error) { return serve(ctx) }, sendEnd(nil))
+			return b.around(ctx, r, "tool_call", sendStart, func(callContext) (mcp.Result, error) { return serve(ctx) }, sendEnd(nil))
 		}}
 		passCtx, forget := b.startPassage(ctx, r, pass)
 		defer forget()
@@ -502,7 +534,7 @@ func (b *installed) emitOutcome(cc callContext, toolName string, known, checksOu
 		}
 	case result == nil || !result.IsError:
 		end := toolCallEnd{ToolName: toolName, DurationMS: elapsed}
-		if b.withholding() {
+		if b.withholding(cc) {
 			end.ResultCapture = ptr("off")
 		} else if result != nil {
 			end.Result = b.scrubValue(jsonValue(result))
@@ -530,7 +562,7 @@ func (b *installed) emitOutcome(cc callContext, toolName string, known, checksOu
 	}
 	// unknown_tool's message describes the request. go-sdk's argument message
 	// does too, but a tool can return the same words, so it is withheld.
-	if b.withholding() && (failure.FailureKind == nil || *failure.FailureKind != "unknown_tool") {
+	if b.withholding(cc) && (failure.FailureKind == nil || *failure.FailureKind != "unknown_tool") {
 		var public *PublicError
 		if errors.As(raised, &public) {
 			failure.ErrorBody = b.errorBody(public.Message)
@@ -554,7 +586,11 @@ func errorType(err error) string {
 	}
 }
 
-func (b *installed) withholding() bool { return b.cfg.ResultCaptureMode == ResultCaptureOff }
+// withholding is the call's results setting, from the Console's settings
+// when they set one (SPEC §2.6).
+func (b *installed) withholding(cc callContext) bool {
+	return cmp.Or(cc.settings.results, b.cfg.ResultCaptureMode) == ResultCaptureOff
+}
 
 func contentText(content []mcp.Content) string {
 	var parts []string
@@ -670,6 +706,7 @@ func (b *installed) emit(cc callContext, eventType string, payload any) {
 		Principal:         cc.who.principal,
 		Organization:      cc.who.org,
 		Labels:            cc.who.labels,
+		Capture:           cc.settings.capture,
 		CallID:            nonEmpty(cc.callID),
 		TransportObserved: cc.session.transport,
 		SessionIDOrigin:   &cc.session.origin,

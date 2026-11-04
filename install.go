@@ -31,6 +31,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 	"weak"
 
@@ -67,6 +68,16 @@ const (
 	ReportOff ReportMode = "off"
 )
 
+// SettingsMode is the type of Config.Settings. Empty means SettingsLocal.
+//
+// Experimental: may change in a minor release.
+type SettingsMode string
+
+const (
+	SettingsLocal   SettingsMode = "local"
+	SettingsConsole SettingsMode = "console"
+)
+
 type Config struct {
 	// DSN is the value from /account, and names the server. Empty means the
 	// BATON_DSN environment variable, unless Sink, VendorID or TenantID is
@@ -97,6 +108,20 @@ type Config struct {
 	// NoScrub turns it off.
 	Scrubber         func(any) any
 	ResolvePrincipal ResolvePrincipal
+	// Settings SettingsConsole reads capture settings from the Console every
+	// SettingsRefresh, so the three modes can differ by label, client or a
+	// share of callers (SPEC §2.6). It needs a DSN. Until the first read
+	// succeeds, and when nothing is saved, this Config's values apply. With
+	// it, ReportMode is ReportOn unless you set it, so the Console can turn
+	// reports off for some callers. SettingsLocal (default) never asks.
+	//
+	// Experimental: may change in a minor release.
+	Settings SettingsMode
+	// SettingsRefresh is how often SettingsConsole reads the settings: 60
+	// seconds when zero, and at least 15.
+	//
+	// Experimental: may change in a minor release.
+	SettingsRefresh time.Duration
 	// Middleware is the server's own receiving middleware, such as an auth
 	// check, added inside Baton's so a call it stops is named "refused".
 	Middleware []mcp.Middleware
@@ -128,7 +153,7 @@ type installed struct {
 	*Baton
 	sessions    *sessions
 	schemas     *lru[*mcp.Tool, map[string]any]
-	listed      *lru[*mcp.Tool, *mcp.Tool]
+	listed      *lru[listedKey, *mcp.Tool]
 	lastSurface lastSurface
 	belowVendor mcp.MethodHandler
 	passages    sync.Map // mcp.Request → *passage
@@ -177,10 +202,13 @@ func settle(impl *mcp.Implementation, opts *mcp.ServerOptions, cfg Config) (b *B
 	if b, err = configure(impl, opts, cfg); err != nil {
 		return nil, nil, err
 	}
-	local := cfg.Sink != nil || cfg.VendorID != "" || cfg.TenantID != ""
+	local := writesLocally(cfg)
 	if cfg.DSN != "" && local {
 		return nil, nil, errors.New("baton: Config has a DSN and also Sink, VendorID or TenantID; " +
 			"a DSN names the server and where its events go, so set one or the other")
+	}
+	if local && cfg.Settings == SettingsConsole {
+		return nil, nil, errors.New(`baton: Config.Settings "console" reads the Console's settings with the DSN's key, so it needs a DSN, not Sink, VendorID or TenantID`)
 	}
 	if local {
 		if openSink, err = b.settleLocally(cfg); err != nil {
@@ -198,11 +226,18 @@ func settle(impl *mcp.Implementation, opts *mcp.ServerOptions, cfg Config) (b *B
 		}
 		b.vendorID, b.tenantID = d.vendorID, d.tenantID
 		openSink = func() sink { return newHTTPSink(d.origin, d.key) }
+		if b.cfg.Settings == SettingsConsole {
+			b.settings = newSettingsReader(d.origin, d.key, d.tenantID, d.vendorID, b.cfg.SettingsRefresh)
+		}
 	}
 	if err := b.nameTheAnnotateTool(); err != nil {
 		return nil, nil, err
 	}
 	return b, openSink, nil
+}
+
+func writesLocally(cfg Config) bool {
+	return cfg.Sink != nil || cfg.VendorID != "" || cfg.TenantID != ""
 }
 
 func (b *Baton) settleLocally(cfg Config) (func() sink, error) {
@@ -223,7 +258,7 @@ func (b *Baton) settleLocally(cfg Config) (func() sink, error) {
 
 func (b *Baton) install(server *mcp.Server, openSink func() sink) *Handle {
 	s := b.newServer()
-	b.sink = openSink()
+	b.open(openSink)
 	s.attach(server)
 	return &Handle{b: s}
 }
@@ -233,7 +268,7 @@ func (b *Baton) newServer() *installed {
 		Baton:    b,
 		sessions: newSessions(),
 		schemas:  newLRU[*mcp.Tool, map[string]any](toolCacheCap),
-		listed:   newLRU[*mcp.Tool, *mcp.Tool](toolCacheCap),
+		listed:   newLRU[listedKey, *mcp.Tool](toolCacheCap),
 	}
 }
 
@@ -285,7 +320,13 @@ func configure(impl *mcp.Implementation, opts *mcp.ServerOptions, cfg Config) (*
 	cfg.ConsentToken = cmp.Or(cfg.ConsentToken, defaultConsentToken)
 	cfg.ResultCaptureMode = cmp.Or(cfg.ResultCaptureMode, ResultCaptureFull)
 	cfg.IntentParamMode = cmp.Or(cfg.IntentParamMode, IntentParamRequired)
+	if cfg.ReportMode == "" && cfg.Settings == SettingsConsole &&
+		(cfg.DSN != "" || !writesLocally(cfg) && os.Getenv("BATON_DSN") != "") {
+		cfg.ReportMode = ReportOn
+	}
 	cfg.ReportMode = cmp.Or(cfg.ReportMode, ReportOff)
+	cfg.Settings = cmp.Or(cfg.Settings, SettingsLocal)
+	cfg.SettingsRefresh = cmp.Or(cfg.SettingsRefresh, defaultSettingsRefresh)
 	customScrubber := cfg.Scrubber != nil
 	if !customScrubber {
 		cfg.Scrubber = DefaultScrubber
@@ -294,6 +335,8 @@ func configure(impl *mcp.Implementation, opts *mcp.ServerOptions, cfg Config) (*
 		oneOf("ResultCaptureMode", cfg.ResultCaptureMode, ResultCaptureFull, ResultCaptureOff),
 		oneOf("IntentParamMode", cfg.IntentParamMode, IntentParamRequired, IntentParamOptional),
 		oneOf("ReportMode", cfg.ReportMode, ReportOn, ReportOff),
+		oneOf("Settings", cfg.Settings, SettingsLocal, SettingsConsole),
+		settingsRefresh(cfg),
 		validToolName(cfg),
 		noNilMiddleware(cfg),
 		namedServer(impl),
@@ -301,15 +344,14 @@ func configure(impl *mcp.Implementation, opts *mcp.ServerOptions, cfg Config) (*
 		return nil, err
 	}
 	b := &Baton{
-		cfg:                 cfg,
-		serverName:          impl.Name,
-		serverInfo:          jsonValue(impl),
-		customScrubber:      customScrubber,
-		userGoalDescription: userGoalDescription(cfg.IntentParamMode),
-		requiredNames:       []string{},
-		seq:                 newSequencer(),
-		sentSurfaces:        newLRU[string, struct{}](sentSurfacesCap),
-		wrapped:             map[weak.Pointer[mcp.Server]]chan struct{}{},
+		cfg:            cfg,
+		serverName:     impl.Name,
+		serverInfo:     jsonValue(impl),
+		customScrubber: customScrubber,
+		requiredNames:  []string{},
+		seq:            newSequencer(),
+		sentSurfaces:   newLRU[string, struct{}](sentSurfacesCap),
+		wrapped:        map[weak.Pointer[mcp.Server]]chan struct{}{},
 	}
 	if opts != nil {
 		b.instructions = opts.Instructions
@@ -327,6 +369,13 @@ func configure(impl *mcp.Implementation, opts *mcp.ServerOptions, cfg Config) (*
 			"which can include text your handler returned. Return a message that names the resource, not its contents.")
 	}
 	return b, nil
+}
+
+func settingsRefresh(cfg Config) error {
+	if cfg.SettingsRefresh < minSettingsRefresh {
+		return fmt.Errorf("baton: Config.SettingsRefresh is %v; it must be at least %v", cfg.SettingsRefresh, minSettingsRefresh)
+	}
+	return nil
 }
 
 func namedServer(impl *mcp.Implementation) error {
