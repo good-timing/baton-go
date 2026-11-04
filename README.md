@@ -169,7 +169,7 @@ A token exists only on streamable HTTP behind go-sdk's `auth.RequireBearerToken`
 
 The id is sent as your hook returns it, so the hook decides what is safe to send. An id longer than 128 characters is cut to 128, and a blank one is not sent. A display name longer than 128 characters is not sent. To send a pseudonym instead, hash the id inside your hook and set `Hashed: true`.
 
-If your users belong to your customers' companies, return the company too, so you can filter by it:
+If your users belong to your customers' companies, return the company too. Each event then carries it:
 
 ```go
 &baton.Principal{ID: "u_123", Organization: &baton.Organization{ID: "org_acme", DisplayName: "Acme"}}
