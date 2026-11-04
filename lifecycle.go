@@ -48,21 +48,28 @@ var lifecycleKinds = map[string]string{
 // lifecycle records a listing, prompt get or resource read (SPEC §11.4.4,
 // §11.4.5).
 func (b *installed) lifecycle(ctx context.Context, req mcp.Request, kind string, serve func(cc callContext) (mcp.Result, error)) (mcp.Result, error) {
+	start, end := b.lifecycleEvents(req, kind)
+	return b.around(ctx, req, kind, start, serve, end)
+}
+
+// lifecycleEvents are the start and end builders of one request's events.
+func (b *installed) lifecycleEvents(req mcp.Request, kind string) (
+	start func(cc *callContext, resuming bool),
+	end func(cc callContext, res mcp.Result, err error, elapsed int64),
+) {
 	var subject map[string]any
-	return b.around(ctx, req, kind,
-		func(cc *callContext, resuming bool) {
+	return func(cc *callContext, resuming bool) {
 			var params map[string]any
 			subject, params = b.lifecycleSubject(req)
 			if resuming {
 				return
 			}
-			start := maps.Clone(subject)
+			event := maps.Clone(subject)
 			if params != nil {
-				start["params"] = params
+				event["params"] = params
 			}
-			b.emit(*cc, kind+"_start", start)
+			b.emit(*cc, kind+"_start", event)
 		},
-		serve,
 		func(cc callContext, res mcp.Result, err error, elapsed int64) {
 			outcome := subject
 			outcome["duration_ms"] = elapsed
@@ -75,7 +82,7 @@ func (b *installed) lifecycle(ctx context.Context, req mcp.Request, kind string,
 				outcome["count"] = n
 			}
 			b.emit(cc, kind+"_end", outcome)
-		})
+		}
 }
 
 // lifecycleSubject's params are what SPEC §11.4.4 records: a prompt's

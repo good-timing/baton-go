@@ -3,6 +3,7 @@ package baton
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -386,5 +387,110 @@ func TestTheSettingsReaderNeverPanicsOut(t *testing.T) {
 	r.readOnce(context.Background())
 	if r.document() != nil {
 		t.Error("a read that panicked stored a document")
+	}
+}
+
+// signsIn puts the user in ctx for every request, as a vendor's auth would.
+func signsIn(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+		return next(context.WithValue(ctx, userKey{}, "u1"), method, req)
+	}
+}
+
+// betaFromAuth labels the user signsIn set as beta.
+func betaFromAuth(ctx context.Context, _ Caller) (*Principal, error) {
+	if id, ok := ctx.Value(userKey{}).(string); ok {
+		return &Principal{ID: id, Labels: []string{"beta"}}, nil
+	}
+	return nil, nil
+}
+
+const betaReports = `{"version": 4, "audiences": [
+	{"id": "beta", "match": {"label": ["beta"]}, "capture": {"reports": "on", "goal": "optional"}},
+	{"id": "everyone", "match": {}, "capture": {"reports": "off"}}]}`
+
+func TestAToolListIsMatchedWithWhatTheVendorsAuthSet(t *testing.T) {
+	b, sink := holding(t, Config{ReportMode: ReportOn, ResolvePrincipal: betaFromAuth, Middleware: []mcp.Middleware{signsIn}}, betaReports)
+	tools := listedTools(t, connect(t, wrapped(t, b, addLookup)))
+	if _, ok := tools[b.annotateName]; !ok || goalRequired(t, tools["lookup"]) {
+		t.Errorf("the tool list was not beta's: report tool %v, user_goal required %v", ok, goalRequired(t, tools["lookup"]))
+	}
+	starts := ofType(sink.all(), "tool_list_start")
+	if len(starts) != 1 || starts[0].Principal == nil || starts[0].Principal.ID != "u1" || starts[0].Capture == nil || starts[0].Capture.Audience != "beta" {
+		t.Errorf("tool_list_start: %+v", starts)
+	}
+	if len(ofType(sink.all(), "tool_list_end")) != 1 {
+		t.Error("want one tool_list_end")
+	}
+}
+
+func TestAToolListTheVendorsMiddlewareStopsIsRecorded(t *testing.T) {
+	refuse := func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method == "tools/list" {
+				return nil, errors.New("sign in first")
+			}
+			return next(ctx, method, req)
+		}
+	}
+	server, sink := installWithSink(t, Config{Middleware: []mcp.Middleware{refuse}}, addLookup)
+	if _, err := connect(t, server).ListTools(context.Background(), nil); err == nil {
+		t.Fatal("the listing was not refused")
+	}
+	if len(ofType(sink.all(), "tool_list_start")) != 1 || len(ofType(sink.all(), "tool_list_error")) != 1 {
+		t.Errorf("events: %v", eventTypes(sink.all()))
+	}
+}
+
+func TestAToolListTheVendorsMiddlewareAnswersGetsUserGoal(t *testing.T) {
+	answer := func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method == "tools/list" {
+				return &mcp.ListToolsResult{Tools: []*mcp.Tool{{Name: "cached", InputSchema: map[string]any{"type": "object"}}}}, nil
+			}
+			return next(ctx, method, req)
+		}
+	}
+	server, sink := installWithSink(t, Config{Middleware: []mcp.Middleware{answer}}, addLookup)
+	if !goalRequired(t, listedTools(t, connect(t, server))["cached"]) {
+		t.Error("the middleware's own list has no required user_goal")
+	}
+	if len(ofType(sink.all(), "tool_list_start")) != 1 || len(ofType(sink.all(), "tool_list_end")) != 1 {
+		t.Errorf("events: %v", eventTypes(sink.all()))
+	}
+}
+
+func TestAToolListTheVendorsMiddlewareListsTwiceIsRecordedOnce(t *testing.T) {
+	twice := func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method == "tools/list" {
+				_, _ = next(ctx, method, req)
+			}
+			return next(ctx, method, req)
+		}
+	}
+	b, sink := holding(t, Config{ReportMode: ReportOn, ResolvePrincipal: betaFromAuth, Middleware: []mcp.Middleware{signsIn, twice}}, betaReports)
+	tools := listedTools(t, connect(t, wrapped(t, b, addLookup)))
+	if _, ok := tools[b.annotateName]; !ok || goalRequired(t, tools["lookup"]) {
+		t.Error("the second listing did not get the caller's settings")
+	}
+	if len(ofType(sink.all(), "tool_list_start")) != 1 {
+		t.Errorf("events: %v", eventTypes(sink.all()))
+	}
+}
+
+func TestAToolListThroughAMiddlewareThatDropsTheCtxIsStillMatched(t *testing.T) {
+	fresh := func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(_ context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			return next(context.WithValue(context.Background(), userKey{}, "u1"), method, req)
+		}
+	}
+	b, sink := holding(t, Config{ReportMode: ReportOn, ResolvePrincipal: betaFromAuth, Middleware: []mcp.Middleware{fresh}}, betaReports)
+	tools := listedTools(t, connect(t, wrapped(t, b, addLookup)))
+	if _, ok := tools[b.annotateName]; !ok {
+		t.Error("the list was not matched with the ctx the middleware passed on")
+	}
+	if len(ofType(sink.all(), "tool_list_start")) != 1 {
+		t.Errorf("events: %v", eventTypes(sink.all()))
 	}
 }
