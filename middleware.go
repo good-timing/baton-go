@@ -50,7 +50,7 @@ func (b *installed) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 			if method == "tools/list" {
 				serve = func(cc callContext) (mcp.Result, error) {
 					res, err := next(ctx, method, req)
-					return b.listTools(ctx, next, req, res, err, cc.settings)
+					return b.withBatonTools(ctx, next, req, res, err, cc.settings)
 				}
 			}
 			return b.lifecycle(ctx, req, kind, serve)
@@ -117,8 +117,7 @@ func (b *installed) startPassage(ctx context.Context, r mcp.Request, p *passage)
 // toolListThroughVendor records a tools/list and adds Baton's tools to it
 // inside the vendor's middleware, so ResolvePrincipal sees what its auth set
 // in ctx and the caller's settings shape the list
-// (TestAToolListIsMatchedWithWhatTheVendorsAuthSet). A listing the vendor's
-// middleware answers itself is recorded and added to here, as before.
+// (TestAToolListIsMatchedWithWhatTheVendorsAuthSet).
 func (b *installed) toolListThroughVendor(ctx context.Context, next mcp.MethodHandler, method string, req mcp.Request) (mcp.Result, error) {
 	start, end := b.lifecycleEvents(req, "tool_list")
 	var settings atomic.Pointer[callSettings]
@@ -126,9 +125,10 @@ func (b *installed) toolListThroughVendor(ctx context.Context, next mcp.MethodHa
 		method: method,
 		run: func(ctx context.Context, serve func(context.Context) (mcp.Result, error)) (mcp.Result, error) {
 			return b.around(ctx, req, "tool_list", start, func(cc callContext) (mcp.Result, error) {
-				settings.Store(&cc.settings)
+				cs := cc.settings
+				settings.Store(&cs)
 				res, err := serve(ctx)
-				return b.listTools(ctx, next, req, res, err, cc.settings)
+				return b.withBatonTools(ctx, next, req, res, err, cs)
 			}, end)
 		},
 		again: func(ctx context.Context, serve func(context.Context) (mcp.Result, error)) (mcp.Result, error) {
@@ -137,9 +137,24 @@ func (b *installed) toolListThroughVendor(ctx context.Context, next mcp.MethodHa
 				cs = *held
 			}
 			res, err := serve(ctx)
-			return b.listTools(ctx, next, req, res, err, cs)
+			return b.withBatonTools(ctx, next, req, res, err, cs)
 		},
 	}
+	return b.throughVendor(ctx, next, method, req, pass, "tool_list_unreached",
+		func(cc *callContext, resuming bool, res mcp.Result, err error, elapsed int64) (mcp.Result, error) {
+			start(cc, resuming)
+			res, err = b.withBatonTools(ctx, next, req, res, err, cc.settings)
+			end(*cc, res, err, elapsed)
+			return res, err
+		})
+}
+
+// throughVendor sends req through the vendor's middleware on pass. A request
+// the middleware never let through is handed to unreached, with the outer
+// ctx's caller.
+func (b *installed) throughVendor(ctx context.Context, next mcp.MethodHandler, method string, req mcp.Request, pass *passage, step string,
+	unreached func(cc *callContext, resuming bool, res mcp.Result, err error, elapsed int64) (mcp.Result, error),
+) (mcp.Result, error) {
 	passCtx, forget := b.startPassage(ctx, req, pass)
 	defer forget()
 	resuming := resumesAPause(req.GetParams())
@@ -147,11 +162,9 @@ func (b *installed) toolListThroughVendor(ctx context.Context, next mcp.MethodHa
 	res, err := next(passCtx, method, req)
 	elapsed := time.Since(began).Milliseconds()
 	if !pass.reached.Load() && !paused(res) {
-		guard("tool_list_unreached", func() {
+		guard(step, func() {
 			cc := b.newCallContext(ctx, req)
-			start(&cc, resuming)
-			res, err = b.listTools(ctx, next, req, res, err, cc.settings)
-			end(cc, res, err, elapsed)
+			res, err = unreached(&cc, resuming, res, err, elapsed)
 		})
 	}
 	return res, err
@@ -282,8 +295,7 @@ func (b *installed) reportsReachable() bool {
 	return doc == nil || doc.reportsOnForAnyone(b.cfg.ReportMode)
 }
 
-// listTools is res with Baton's tools added, when it is a list.
-func (b *installed) listTools(ctx context.Context, next mcp.MethodHandler, req mcp.Request, res mcp.Result, err error, cs callSettings) (mcp.Result, error) {
+func (b *installed) withBatonTools(ctx context.Context, next mcp.MethodHandler, req mcp.Request, res mcp.Result, err error, cs callSettings) (mcp.Result, error) {
 	if r, ok := res.(*mcp.ListToolsResult); ok && err == nil {
 		var listed *mcp.ListToolsResult
 		guard("tools/list", func() { listed = b.augmentToolList(ctx, next, req, r, cs) })
@@ -516,19 +528,12 @@ func (b *installed) toolCall(ctx context.Context, next mcp.MethodHandler, method
 		pass := &passage{method: method, run: func(ctx context.Context, serve func(context.Context) (mcp.Result, error)) (mcp.Result, error) {
 			return b.around(ctx, r, "tool_call", sendStart, func(callContext) (mcp.Result, error) { return serve(ctx) }, sendEnd(nil))
 		}}
-		passCtx, forget := b.startPassage(ctx, r, pass)
-		defer forget()
-		resuming := resumesAPause(r.GetParams())
-		began := time.Now()
-		res, err = next(passCtx, method, r)
-		elapsed := time.Since(began).Milliseconds()
-		if !pass.reached.Load() && !paused(res) {
-			guard("tool_call_refused", func() {
-				cc := b.newCallContext(ctx, r)
-				sendStart(&cc, resuming)
-				sendEnd(ptr("refused"))(cc, res, err, elapsed)
+		res, err = b.throughVendor(ctx, next, method, r, pass, "tool_call_refused",
+			func(cc *callContext, resuming bool, res mcp.Result, err error, elapsed int64) (mcp.Result, error) {
+				sendStart(cc, resuming)
+				sendEnd(ptr("refused"))(*cc, res, err, elapsed)
+				return res, err
 			})
-		}
 	}
 	return emptyIfNil(res, err)
 }

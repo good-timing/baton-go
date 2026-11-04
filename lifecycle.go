@@ -52,7 +52,6 @@ func (b *installed) lifecycle(ctx context.Context, req mcp.Request, kind string,
 	return b.around(ctx, req, kind, start, serve, end)
 }
 
-// lifecycleEvents are the start and end builders of one request's events.
 func (b *installed) lifecycleEvents(req mcp.Request, kind string) (
 	start func(cc *callContext, resuming bool),
 	end func(cc callContext, res mcp.Result, err error, elapsed int64),
