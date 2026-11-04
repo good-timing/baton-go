@@ -13,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -39,6 +40,7 @@ type measure struct {
 	Warmup      int    `json:"warmup"`
 	Calls       int    `json:"calls"`
 	Concurrency int    `json:"concurrency"`
+	ResultBytes int    `json:"result_bytes"`
 }
 
 var spec = filepath.Join("..", "baton-spec")
@@ -82,6 +84,14 @@ func withCollector(mode string, use func(port int) map[string]float64) map[strin
 	return use(port)
 }
 
+// losses is emitted, delivered and lost for m's calls, a tool_call_start and a
+// tool_call_end each.
+func losses(port int, m measure) map[string]float64 {
+	emitted := float64(2 * (m.Warmup + m.Calls))
+	got := delivered(port, m.Collector)
+	return map[string]float64{"emitted": emitted, "delivered": got, "lost": emitted - got}
+}
+
 func delivered(port int, mode string) float64 {
 	if mode == "down" {
 		return 0
@@ -109,11 +119,22 @@ func echo(_ context.Context, _ *mcp.CallToolRequest, in echoIn) (*mcp.CallToolRe
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: in.Text}}}, nil, nil
 }
 
+func large(size int) mcp.ToolHandlerFor[struct{}, any] {
+	text := strings.Repeat("hello ", size/6+1)[:size]
+	return func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}, nil, nil
+	}
+}
+
 // echoClient is a session with the bench server, with Baton sending to port
-// unless it is 0. Close the session, then the handle.
-func echoClient(ctx context.Context, port int) (*mcp.ClientSession, *baton.Handle) {
+// unless it is 0, and the large tool when resultBytes is set. Close the
+// session, then the handle.
+func echoClient(ctx context.Context, port, resultBytes int) (*mcp.ClientSession, *baton.Handle) {
 	server := mcp.NewServer(&mcp.Implementation{Name: "bench", Version: "1.0.0"}, nil)
 	mcp.AddTool(server, &mcp.Tool{Name: "echo"}, echo)
+	if resultBytes > 0 {
+		mcp.AddTool(server, &mcp.Tool{Name: "large"}, large(resultBytes))
+	}
 	var handle *baton.Handle
 	if port != 0 {
 		dsn := fmt.Sprintf("http://%s@127.0.0.1:%d/ten_655b084e118b43f88992ee6357fcc23c/bench", key, port)
@@ -134,8 +155,10 @@ func echoClient(ctx context.Context, port int) (*mcp.ClientSession, *baton.Handl
 	return session, handle
 }
 
+var echoCall = &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "hello"}}
+
 // timedCalls returns each call's ms, with concurrency calls in flight at once.
-func timedCalls(ctx context.Context, session *mcp.ClientSession, calls, concurrency int) []float64 {
+func timedCalls(ctx context.Context, session *mcp.ClientSession, call *mcp.CallToolParams, calls, concurrency int) []float64 {
 	times := make([]float64, calls)
 	var next atomic.Int64
 	var workers sync.WaitGroup
@@ -147,10 +170,10 @@ func timedCalls(ctx context.Context, session *mcp.ClientSession, calls, concurre
 					return
 				}
 				started := time.Now()
-				result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"text": "hello"}})
+				result, err := session.CallTool(ctx, call)
 				times[i] = ms(time.Since(started))
 				if err != nil || result.IsError {
-					fatal(fmt.Sprintf("echo failed: %v %v", err, result))
+					fatal(fmt.Sprintf("%s failed: %v %v", call.Name, err, result))
 				}
 			}
 		})
@@ -171,49 +194,69 @@ var percentiles = []int{50, 99}
 
 func overhead(ctx context.Context, m measure) map[string]float64 {
 	return withCollector(m.Collector, func(port int) map[string]float64 {
-		out := map[string]float64{}
-		for _, side := range []struct {
-			name string
-			port int
-		}{{"plain", 0}, {"baton", port}} {
-			session, handle := echoClient(ctx, side.port)
-			timedCalls(ctx, session, m.Warmup, 1)
-			times := timedCalls(ctx, session, m.Calls, m.Concurrency)
-			_ = session.Close()
-			handle.Close(ctx)
-			for _, p := range percentiles {
-				out[fmt.Sprintf("%s_p%d_ms", side.name, p)] = pct(times, float64(p))
-			}
-		}
-		for _, p := range percentiles {
-			out[fmt.Sprintf("added_p%d_ms", p)] = out[fmt.Sprintf("baton_p%d_ms", p)] - out[fmt.Sprintf("plain_p%d_ms", p)]
-		}
+		return added(ctx, m, port, echoCall)
+	})
+}
+
+var largeCall = &mcp.CallToolParams{Name: "large", Arguments: map[string]any{}}
+
+func largeResult(ctx context.Context, m measure) map[string]float64 {
+	return withCollector(m.Collector, func(port int) map[string]float64 {
+		out := added(ctx, m, port, largeCall)
+		maps.Copy(out, losses(port, m))
+		// Read on a second Baton server, untimed, so the full GCs stay out
+		// of the timed calls. Its events come after the count above.
+		session, handle := echoClient(ctx, port, m.ResultBytes)
+		timedCalls(ctx, session, largeCall, m.Warmup, 1)
+		before := liveHeap()
+		timedCalls(ctx, session, largeCall, m.Calls, m.Concurrency)
+		out["heap_growth_bytes"] = liveHeap() - before
+		_ = session.Close()
+		handle.Close(ctx)
 		return out
 	})
 }
 
+// added runs m's calls on a server without Baton, then on one with it, and
+// returns the call times and what Baton adds to them.
+func added(ctx context.Context, m measure, port int, call *mcp.CallToolParams) map[string]float64 {
+	out := map[string]float64{}
+	for _, side := range []struct {
+		name string
+		port int
+	}{{"plain", 0}, {"baton", port}} {
+		session, handle := echoClient(ctx, side.port, m.ResultBytes)
+		timedCalls(ctx, session, call, m.Warmup, 1)
+		times := timedCalls(ctx, session, call, m.Calls, m.Concurrency)
+		_ = session.Close()
+		handle.Close(ctx)
+		for _, p := range percentiles {
+			out[fmt.Sprintf("%s_p%d_ms", side.name, p)] = pct(times, float64(p))
+		}
+	}
+	for _, p := range percentiles {
+		out[fmt.Sprintf("added_p%d_ms", p)] = out[fmt.Sprintf("baton_p%d_ms", p)] - out[fmt.Sprintf("plain_p%d_ms", p)]
+	}
+	return out
+}
+
 func load(ctx context.Context, m measure) map[string]float64 {
 	return withCollector(m.Collector, func(port int) map[string]float64 {
-		session, handle := echoClient(ctx, port)
-		timedCalls(ctx, session, m.Warmup, 1)
+		session, handle := echoClient(ctx, port, 0)
+		timedCalls(ctx, session, echoCall, m.Warmup, 1)
 		started := time.Now()
-		times := timedCalls(ctx, session, m.Calls, m.Concurrency)
+		times := timedCalls(ctx, session, echoCall, m.Calls, m.Concurrency)
 		wall := time.Since(started)
 		_ = session.Close()
 		started = time.Now()
 		handle.Close(ctx)
 		closing := time.Since(started)
-		emitted := float64(2 * (m.Warmup + m.Calls))
-		got := delivered(port, m.Collector)
-		return map[string]float64{
-			"wall_ms":     ms(wall),
-			"call_p50_ms": pct(times, 50),
-			"call_p99_ms": pct(times, 99),
-			"close_ms":    ms(closing),
-			"emitted":     emitted,
-			"delivered":   got,
-			"lost":        emitted - got,
-		}
+		out := losses(port, m)
+		out["wall_ms"] = ms(wall)
+		out["call_p50_ms"] = pct(times, 50)
+		out["call_p99_ms"] = pct(times, 99)
+		out["close_ms"] = ms(closing)
+		return out
 	})
 }
 
@@ -227,11 +270,11 @@ func liveHeap() float64 {
 func memory(ctx context.Context, m measure) map[string]float64 {
 	half := m.Calls / 2
 	return withCollector(m.Collector, func(port int) map[string]float64 {
-		session, handle := echoClient(ctx, port)
-		timedCalls(ctx, session, m.Warmup, 1)
+		session, handle := echoClient(ctx, port, 0)
+		timedCalls(ctx, session, echoCall, m.Warmup, 1)
 		heaps := []float64{liveHeap()}
 		for range 2 {
-			timedCalls(ctx, session, half, m.Concurrency)
+			timedCalls(ctx, session, echoCall, half, m.Concurrency)
 			heaps = append(heaps, liveHeap())
 		}
 		_ = session.Close()
@@ -247,6 +290,7 @@ func memory(ctx context.Context, m measure) map[string]float64 {
 
 var runners = map[string]func(context.Context, measure) map[string]float64{
 	"overhead":      overhead,
+	"large_result":  largeResult,
 	"burst":         load,
 	"outage_hang":   load,
 	"outage_down":   load,
