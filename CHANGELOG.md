@@ -1,7 +1,11 @@
 # Changelog
 
-## Unreleased
+## 1.0.0
 
+- **Stable from 1.0.** This module follows semver: a breaking change to the
+  public API is a new major, with a `/v2` module path. The wire format only
+  grows (SPEC §13). 1.0 covers the MCP path only: the library API comes in a
+  later 1.x release.
 - **Settings from the Console (experimental).** `Config.Settings:
   baton.SettingsConsole` reads the capture settings saved on the Console
   (SPEC §2.6), with the DSN's key, in the background: once at start, then
