@@ -76,7 +76,7 @@
   ```
 
   It is its own module and was never part of the library's API.
-- **The report tool is named once, in `New`, not in every `Wrap`.** A
+- **Breaking: the report tool is named once, in `New`, not in every `Wrap`.** A
   `VendorDisplayName` that leaves no room for the report tool is now a config
   error from `New`, as it already was from `Install`. Before, each `Wrap` logged one warning and served the server
   without the report tool.
