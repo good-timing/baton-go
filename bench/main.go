@@ -130,7 +130,8 @@ func large(size int) mcp.ToolHandlerFor[struct{}, any] {
 // unless it is 0, and the large tool when resultBytes is set. Close the
 // session, then the handle.
 func echoClient(ctx context.Context, port, resultBytes int) (*mcp.ClientSession, *baton.Handle) {
-	server := mcp.NewServer(&mcp.Implementation{Name: "bench", Version: "1.0.0"}, nil)
+	impl := &mcp.Implementation{Name: "bench", Version: "1.0.0"}
+	server := mcp.NewServer(impl, nil)
 	mcp.AddTool(server, &mcp.Tool{Name: "echo"}, echo)
 	if resultBytes > 0 {
 		mcp.AddTool(server, &mcp.Tool{Name: "large"}, large(resultBytes))
@@ -139,7 +140,7 @@ func echoClient(ctx context.Context, port, resultBytes int) (*mcp.ClientSession,
 	if port != 0 {
 		dsn := fmt.Sprintf("http://%s@127.0.0.1:%d/ten_655b084e118b43f88992ee6357fcc23c/bench", key, port)
 		var err error
-		if handle, err = baton.Install(server, baton.Config{DSN: dsn}); err != nil {
+		if handle, err = baton.Install(server, impl, nil, baton.Config{DSN: dsn}); err != nil {
 			fatal(err)
 		}
 	}

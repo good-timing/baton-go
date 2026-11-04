@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+- **Breaking: `Install` and `New` take your server's `impl` and `opts`.**
+  Every `Install` call changes, and so does 0.2.1's `New(cfg)`. This breaks
+  at compile time: the compiler points at each call. Pass the same `impl` and `opts` you gave
+  `mcp.NewServer` (`opts` may be nil):
+
+  ```go
+  // Before
+  handle, err := baton.Install(server, cfg)
+  b, err := baton.New(cfg)
+
+  // After
+  impl := &mcp.Implementation{Name: "your-vendor-mcp", Version: "1.0.0"}
+  server := mcp.NewServer(impl, opts)
+  handle, err := baton.Install(server, impl, opts, cfg)
+  b, err := baton.New(impl, opts, cfg)
+  ```
+
+  A nil `impl` or an empty `impl.Name` is a config error in both. `New` then
+  returns a Baton that records nothing, and `Install` returns the error. Both
+  still add `Config.Middleware`. `BATON_DISABLED` checks nothing, as before.
+- **Baton no longer calls your server.** `Install` and `Wrap` used to send
+  your server a setup call of their own, which went through any middleware
+  you had added. Now they send nothing. The report tool's name and the
+  server's name, version and instructions come from `impl` and `opts`. Your
+  server's capabilities come from the first `initialize` or `server/discover`
+  a client sends. If a tool call comes first, as can happen in stateless
+  HTTP, the first `surface_snapshot` has no capabilities, and a second one
+  with them follows. If a client's `initialize` shows a different server name
+  than `impl`, Baton warns once.
+
 ## 0.2.2
 
 - **A large captured value adds much less time to its tool call.** The

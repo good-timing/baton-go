@@ -1,18 +1,20 @@
 // Package baton sends what happens on a go-sdk MCP server's tools to Baton.
 //
-//	handle, err := baton.Install(server, baton.Config{DSN: "https://baton_pk_...@baton.goodtiming.ai/ten_.../my-server"})
+//	impl := &mcp.Implementation{Name: "my-server", Version: "1.0.0"}
+//	server := mcp.NewServer(impl, nil)
+//	handle, err := baton.Install(server, impl, nil, baton.Config{DSN: "https://baton_pk_...@baton.goodtiming.ai/ten_.../my-server"})
 //	defer handle.Close(context.Background())
 //
 // A process that builds a new server per request makes one Baton at startup
 // and wraps each server; the servers share its sender and sink:
 //
-//	b, err := baton.New(cfg)
+//	b, err := baton.New(impl, opts, cfg)
 //	if err != nil {
 //		log.Fatal(err)
 //	}
 //	defer b.Close(context.Background())
 //	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
-//		s := newServer()
+//		s := mcp.NewServer(impl, opts) // and your AddTool lines
 //		b.Wrap(s)
 //		return s
 //	}, nil)
@@ -103,7 +105,6 @@ type installed struct {
 	annotateName  string
 	annotate      annotateTool
 	reportPointer string
-	server        serverMeta
 	sessions      *sessions
 	schemas       *lru[*mcp.Tool, map[string]any]
 	listed        *lru[*mcp.Tool, *mcp.Tool]
@@ -112,16 +113,19 @@ type installed struct {
 	passages      sync.Map // mcp.Request → *passage
 }
 
-// Install adds Baton to server. Call it after the vendor's own AddTool lines;
-// tools added later are covered too. Pass the server's own middleware in
-// Config.Middleware: middleware added after Install runs before Baton, so a
-// call it stops is not recorded. Install adds Config.Middleware even when it
-// adds nothing of Baton's or returns an error, so do not add it again. Call it
+// Install adds Baton to server. Pass the impl and opts server was built with:
+// Baton reads the server's name, version and instructions from them, and a nil
+// impl or an empty impl.Name is an error. opts may be nil. Call it after the
+// vendor's own AddTool lines; tools added later are covered too. Pass the
+// server's own middleware in Config.Middleware: middleware added after Install
+// runs before Baton, so a call it stops is not recorded. Install adds
+// Config.Middleware even when it adds nothing of Baton's or returns an error,
+// so do not add it again. Call it
 // once per server: each Install starts its own sender, which runs until Close;
 // for servers built per request, use New and Wrap. With BATON_DISABLED=1 in
 // the environment, Install adds nothing else and checks nothing, not even
-// server or cfg.
-func Install(server *mcp.Server, cfg Config) (h *Handle, err error) {
+// its arguments.
+func Install(server *mcp.Server, impl *mcp.Implementation, opts *mcp.ServerOptions, cfg Config) (h *Handle, err error) {
 	// When Baton adds nothing, the vendor's middleware still runs: it may be
 	// their auth (TestTheVendorsMiddlewareRunsWhenBatonIsNotInstalled).
 	defer func() {
@@ -136,7 +140,7 @@ func Install(server *mcp.Server, cfg Config) (h *Handle, err error) {
 	if server == nil {
 		return nil, errors.New("baton: Install needs a server")
 	}
-	b, openSink, err := settle(cfg)
+	b, openSink, err := settle(impl, opts, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -148,8 +152,8 @@ func Install(server *mcp.Server, cfg Config) (h *Handle, err error) {
 
 // settle checks cfg and says where events go: openSink is nil, after one
 // warning, when nothing is configured.
-func settle(cfg Config) (b *Baton, openSink func() sink, err error) {
-	if b, err = configure(cfg); err != nil {
+func settle(impl *mcp.Implementation, opts *mcp.ServerOptions, cfg Config) (b *Baton, openSink func() sink, err error) {
+	if b, err = configure(impl, opts, cfg); err != nil {
 		return nil, nil, err
 	}
 	local := cfg.Sink != nil || cfg.VendorID != "" || cfg.TenantID != ""
@@ -192,7 +196,7 @@ func (b *Baton) settleLocally(cfg Config) (func() sink, error) {
 
 // install starts the sink last, after everything that can fail.
 func (b *Baton) install(server *mcp.Server, openSink func() sink) (*Handle, error) {
-	s, err := b.newServer(server)
+	s, err := b.newServer()
 	if err != nil {
 		return nil, err
 	}
@@ -201,25 +205,15 @@ func (b *Baton) install(server *mcp.Server, openSink func() sink) (*Handle, erro
 	return &Handle{b: s}, nil
 }
 
-// newServer probes server and names its report tool. On a naming error the
-// server is still usable, without the report tool.
-func (b *Baton) newServer(server *mcp.Server) (*installed, error) {
-	meta, err := probeServer(server)
-	if err != nil {
-		// Never stop the vendor's server over this: the names fall back to
-		// the vendor id and the snapshot lacks the server's own details.
-		b.probeWarned.Do(func() {
-			slog.Warn("baton: could not read the server's name and instructions; continuing without them", "error", err)
-		})
-	}
+// newServer names the server's report tool. On a naming error the server is
+// still usable, without the report tool.
+func (b *Baton) newServer() (*installed, error) {
 	s := &installed{
 		Baton:    b,
-		server:   meta,
 		sessions: newSessions(),
 		schemas:  newLRU[*mcp.Tool, map[string]any](toolCacheCap),
 		listed:   newLRU[*mcp.Tool, *mcp.Tool](toolCacheCap),
 	}
-	s.sessions.ioConnType = meta.ioConnType
 	return s, s.nameTheAnnotateTool()
 }
 
@@ -267,7 +261,7 @@ func oneOf(field, value string, allowed ...string) error {
 	return fmt.Errorf("baton: Config.%s is %q; use one of %q", field, value, allowed)
 }
 
-func configure(cfg Config) (*Baton, error) {
+func configure(impl *mcp.Implementation, opts *mcp.ServerOptions, cfg Config) (*Baton, error) {
 	cfg.ConsentToken = cmp.Or(cfg.ConsentToken, defaultConsentToken)
 	cfg.ResultCapture = cmp.Or(cfg.ResultCapture, "full")
 	cfg.IntentParam = cmp.Or(cfg.IntentParam, "required")
@@ -282,17 +276,23 @@ func configure(cfg Config) (*Baton, error) {
 		oneOf("ReportMode", cfg.ReportMode, "on", "off"),
 		validToolName(cfg),
 		noNilMiddleware(cfg),
+		namedServer(impl),
 	); err != nil {
 		return nil, err
 	}
 	b := &Baton{
 		cfg:                 cfg,
+		serverName:          impl.Name,
+		serverInfo:          jsonValue(impl),
 		customScrubber:      customScrubber,
 		userGoalDescription: userGoalDescription(cfg.IntentParam),
 		requiredNames:       []string{},
 		seq:                 newSequencer(),
 		sentSurfaces:        newLRU[string, struct{}](sentSurfacesCap),
 		wrapped:             map[weak.Pointer[mcp.Server]]chan struct{}{},
+	}
+	if opts != nil {
+		b.instructions = opts.Instructions
 	}
 	if cfg.IntentParam == "required" {
 		b.requiredNames = []string{userGoalParam}
@@ -309,6 +309,13 @@ func configure(cfg Config) (*Baton, error) {
 	return b, nil
 }
 
+func namedServer(impl *mcp.Implementation) error {
+	if impl == nil || impl.Name == "" {
+		return errors.New("baton: pass the *mcp.Implementation your server was built with, with its Name set")
+	}
+	return nil
+}
+
 // validToolName checks the report tool's name when the tool is served, as
 // baton-sdk does (TestWithoutADSNABadSettingStillFails).
 func validToolName(cfg Config) error {
@@ -323,7 +330,7 @@ func validToolName(cfg Config) error {
 // any session: a stateless server lists tools in one request and calls them
 // in another, maybe in another process.
 func (b *installed) nameTheAnnotateTool() error {
-	chosen := nameTheVendorChose(b.server.name)
+	chosen := nameTheVendorChose(b.serverName)
 	b.displayName = cmp.Or(b.cfg.VendorDisplayName, chosen, b.vendorID)
 	if b.cfg.ReportMode != "on" {
 		return nil

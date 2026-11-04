@@ -26,6 +26,7 @@ func (b *installed) middleware(next mcp.MethodHandler) mcp.MethodHandler {
 		case "initialize", "server/discover":
 			res, err := next(ctx, method, req)
 			if err == nil {
+				guard("setup answer", func() { b.keepSetupAnswer(res) })
 				guard("instructions", func() {
 					if instructions := instructionsOf(res); instructions != nil {
 						if l, ok := b.vendorTools(ctx, next, req); ok {
@@ -686,22 +687,24 @@ func (b *installed) sequence(sess callSession) int64 {
 	return b.seq.next(sess)
 }
 
-// lastSurface is the tool list the last snapshot was checked against, so an
-// unchanged list skips the hash.
+// lastSurface is the tool list and capabilities the last snapshot was checked
+// against, so an unchanged surface skips the hash.
 type lastSurface struct {
 	mu    sync.Mutex
 	seen  bool
 	tools []*mcp.Tool
+	caps  *capabilities
 }
 
-func (l *lastSurface) unchanged(tools listing) bool {
+func (l *lastSurface) unchanged(tools listing, caps *capabilities) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.seen && slices.Equal(l.tools, tools) {
+	if l.seen && l.caps == caps && slices.Equal(l.tools, tools) {
 		return true
 	}
 	l.seen = true
 	l.tools = slices.Clone(tools)
+	l.caps = caps
 	return false
 }
 

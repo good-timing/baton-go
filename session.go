@@ -2,6 +2,7 @@ package baton
 
 import (
 	"container/list"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
@@ -69,10 +70,7 @@ type sessions struct {
 	// fallbackSeq numbers the fallback session here, not in the Baton's
 	// shared counter, so a server per request leaves no entry behind.
 	fallbackSeq atomic.Int64
-	// ioConnType is go-sdk's unexported stdio and in-memory connection type,
-	// taken from the probe's connection; nil if the probe failed.
-	ioConnType reflect.Type
-	minted     *lru[weak.Pointer[mcp.ServerSession], string]
+	minted      *lru[weak.Pointer[mcp.ServerSession], string]
 }
 
 const sessionCap = 4096
@@ -91,7 +89,7 @@ func (s *sessions) resolve(conn *mcp.ServerSession, header http.Header) callSess
 	if conn == nil {
 		return s.process()
 	}
-	if s.ioConnType != nil && connType(conn) == s.ioConnType {
+	if t := ioConnType(); t != nil && connType(conn) == t {
 		return callSession{id: s.fallback, origin: "minted", transport: &transportNoHTTP}
 	}
 	if id := sseSessionID(conn); id != "" {
@@ -122,6 +120,21 @@ func sseSessionID(conn *mcp.ServerSession) string {
 func (s *sessions) process() callSession {
 	return callSession{id: s.fallback, origin: "minted"}
 }
+
+// ioConnType is go-sdk's unexported stdio and in-memory connection type, read
+// from a server Baton builds, never the vendor's
+// (TestBatonNeverCallsTheVendorsServer).
+var ioConnType = sync.OnceValue(func() reflect.Type {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, serverSide := mcp.NewInMemoryTransports()
+	session, err := mcp.NewServer(&mcp.Implementation{Name: "baton"}, nil).Connect(ctx, serverSide, nil)
+	if err != nil {
+		return nil
+	}
+	defer session.Close()
+	return connType(session)
+})
 
 // connType is the dynamic type of the session's connection; nil when it cannot
 // be read, and the transport is then reported as unknown.

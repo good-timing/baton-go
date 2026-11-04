@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"weak"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -23,6 +24,16 @@ type Baton struct {
 	requiredNames       []string
 	seq                 *sequencer
 	sentSurfaces        *lru[string, struct{}]
+	serverName          string
+	serverInfo          any
+	instructions        string
+	// capabilities is from the first initialize or server/discover answer:
+	// go-sdk computes them from what is registered and does not export them.
+	capabilities atomic.Pointer[capabilities]
+	// noCaps is read-held while a snapshot without capabilities is sent and
+	// held while they are stored, so that snapshot never follows one with them
+	// (TestASnapshotWithoutCapabilitiesIsNeverSentAfterOneWithThem).
+	noCaps sync.RWMutex
 	// off is BATON_DISABLED: Wrap checks nothing, not even the server.
 	off bool
 
@@ -32,8 +43,8 @@ type Baton struct {
 	paramsShapeWarned sync.Once
 	hooksStuckWarned  sync.Once
 	hookSlowWarned    sync.Once
-	probeWarned       sync.Once
 	nameFitWarned     sync.Once
+	nameDriftWarned   sync.Once
 	wrapFailWarned    sync.Once
 
 	closedWarned sync.Once
@@ -46,18 +57,21 @@ type Baton struct {
 }
 
 // New checks cfg and starts the sender, for servers added later with Wrap.
-// It returns an error only for a config that is not valid; a report tool that
-// cannot be named for a server is warned about at Wrap. With a config error, no
-// DSN, Sink, VendorID or TenantID, or BATON_DISABLED=1, it returns a Baton
-// that records nothing and whose Wrap adds only Config.Middleware.
-func New(cfg Config) (*Baton, error) {
+// Pass the impl and opts every wrapped server is built with; servers built
+// with different ones need a Baton each. opts may be nil. It returns an error
+// only for a config that is not valid, which includes a nil impl or an empty
+// impl.Name; a report tool that cannot be named is warned about at Wrap. With
+// a config error, no DSN, Sink, VendorID or TenantID, or BATON_DISABLED=1, it
+// returns a Baton that records nothing and whose Wrap adds only
+// Config.Middleware.
+func New(impl *mcp.Implementation, opts *mcp.ServerOptions, cfg Config) (*Baton, error) {
 	if captureDisabled() {
 		slog.Info("baton: BATON_DISABLED is set, so Baton is not installed and records nothing")
 		b := inertBaton(cfg.Middleware)
 		b.off = true
 		return b, nil
 	}
-	b, openSink, err := settle(cfg)
+	b, openSink, err := settle(impl, opts, cfg)
 	if err != nil {
 		return inertBaton(cfg.Middleware), err
 	}
@@ -92,7 +106,7 @@ func (b *Baton) Wrap(server *mcp.Server) error {
 		addVendorMiddleware(server, b.cfg.Middleware)
 		return nil
 	}
-	s, err := b.newServer(server)
+	s, err := b.newServer()
 	if err != nil {
 		b.wrapFailWarned.Do(func() {
 			slog.Warn("baton: Wrap could not name the report tool, so this server runs without it (warned once)", "error", err)
@@ -103,8 +117,7 @@ func (b *Baton) Wrap(server *mcp.Server) error {
 }
 
 // claim records server, and reports whether it was new to b and whether b
-// records events. It comes before the probe: go-sdk may ask for one server
-// twice per request.
+// records events. go-sdk may ask for one server twice per request.
 func (b *Baton) claim(server *mcp.Server) (added chan struct{}, first, recording bool) {
 	key := weak.Make(server)
 	b.mu.Lock()

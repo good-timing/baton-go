@@ -217,7 +217,7 @@ func TestEventsReachTheConsole(t *testing.T) {
 	console := newFakeConsole(t, nil)
 	server := newVectorServer()
 	addLookup(server)
-	handle, err := Install(server, Config{DSN: console.dsn()})
+	handle, err := Install(server, testImpl, nil, Config{DSN: console.dsn()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func TestAStuckConsoleDoesNotSlowToolCalls(t *testing.T) {
 	logs := captureLogs(t)
 	server := newVectorServer()
 	addLookup(server)
-	handle, err := Install(server, Config{DSN: console.dsn()})
+	handle, err := Install(server, testImpl, nil, Config{DSN: console.dsn()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -493,7 +493,7 @@ func TestWithoutADSNNothingIsInstalled(t *testing.T) {
 	logs := captureLogs(t)
 	server := newVectorServer()
 	addLookup(server)
-	handle, err := Install(server, Config{ReportMode: "on"})
+	handle, err := Install(server, testImpl, nil, Config{ReportMode: "on"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -521,12 +521,12 @@ func TestWithoutADSNABadSettingStillFails(t *testing.T) {
 		"bad value":            {newVectorServer(), Config{ResultCapture: "none"}},
 		"bad report tool name": {newVectorServer(), Config{ReportMode: "on", AnnotationToolName: "not a name"}},
 	} {
-		if _, err := Install(c.server, c.cfg); err == nil {
+		if _, err := Install(c.server, testImpl, nil, c.cfg); err == nil {
 			t.Errorf("%s: installed with no error", name)
 		}
 	}
 	// The report tool is not served, so its name is not used.
-	if _, err := Install(newVectorServer(), Config{AnnotationToolName: "not a name"}); err != nil {
+	if _, err := Install(newVectorServer(), testImpl, nil, Config{AnnotationToolName: "not a name"}); err != nil {
 		t.Errorf("an unused report tool name failed: %v", err)
 	}
 }
@@ -536,7 +536,7 @@ func TestTheEnvironmentDSNIsUsed(t *testing.T) {
 	t.Setenv("BATON_DSN", console.dsn())
 	server := newVectorServer()
 	addLookup(server)
-	handle, err := Install(server, Config{})
+	handle, err := Install(server, testImpl, nil, Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -549,7 +549,7 @@ func TestTheEnvironmentDSNIsUsed(t *testing.T) {
 }
 
 func TestABadDSNIsAnErrorWithoutTheKey(t *testing.T) {
-	_, err := Install(newVectorServer(), Config{DSN: strings.Replace(testDSN, "echo-server", "my.server", 1)})
+	_, err := Install(newVectorServer(), testImpl, nil, Config{DSN: strings.Replace(testDSN, "echo-server", "my.server", 1)})
 	if err == nil || strings.Contains(err.Error(), testKey) {
 		t.Fatalf("err %v", err)
 	}

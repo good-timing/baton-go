@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -38,20 +37,6 @@ func wrappedCount(b *Baton) int {
 	return len(b.wrapped)
 }
 
-// countProbes counts the initialize requests Baton's probe sends to server.
-func countProbes(server *mcp.Server) *atomic.Int32 {
-	var n atomic.Int32
-	server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
-		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-			if p, ok := req.GetParams().(*mcp.InitializeParams); ok && p.ClientInfo != nil && p.ClientInfo.Name == "baton-probe" {
-				n.Add(1)
-			}
-			return next(ctx, method, req)
-		}
-	})
-	return &n
-}
-
 // unchanged reports whether server lists its tools as the vendor added them.
 func unchanged(t *testing.T, server *mcp.Server) bool {
 	t.Helper()
@@ -68,14 +53,10 @@ func TestWrappingAServerTwiceAddsBatonOnce(t *testing.T) {
 	b, sink := newTestBaton(t, Config{})
 	server := newVectorServer()
 	addLookup(server)
-	probes := countProbes(server)
 	for range 2 {
 		if err := b.Wrap(server); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if n := probes.Load(); n != 1 {
-		t.Errorf("probed %d times, want 1", n)
 	}
 	call(t, connect(t, server), "lookup", map[string]any{"name": "a"})
 	if n := len(ofType(sink.all(), "tool_call_start")); n != 1 {
@@ -87,7 +68,7 @@ func TestWrapAfterCloseWarnsOnceAndAddsNothing(t *testing.T) {
 	logs := captureLogs(t)
 	t.Setenv("BATON_DSN", "")
 	rec := &recordingSink{}
-	b, err := New(Config{VendorID: "acme", Sink: rec})
+	b, err := New(testImpl, nil, Config{VendorID: "acme", Sink: rec})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +164,7 @@ func TestANewServerPerHTTPRequest(t *testing.T) {
 func TestNewWithNothingConfiguredIsInert(t *testing.T) {
 	logs := captureLogs(t)
 	t.Setenv("BATON_DSN", "")
-	b, err := New(Config{})
+	b, err := New(testImpl, nil, Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +190,7 @@ func TestNewWithNothingConfiguredIsInert(t *testing.T) {
 
 func TestTheOffSwitchMakesAnInertBaton(t *testing.T) {
 	t.Setenv("BATON_DISABLED", "1")
-	b, err := New(Config{DSN: "not a dsn"})
+	b, err := New(testImpl, nil, Config{DSN: "not a dsn"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,10 +262,11 @@ func TestAServersOwnSessionIsNotInTheSharedCounter(t *testing.T) {
 
 func TestWrapGoesOnWithoutTheReportToolWhenItCannotNameIt(t *testing.T) {
 	logs := captureLogs(t)
-	b, sink := newTestBaton(t, Config{ReportMode: "on"})
-	long := strings.Repeat("x", 3000)
+	impl := &mcp.Implementation{Name: strings.Repeat("x", 3000)}
+	b, sink := configuredWith(t, impl, nil, Config{ReportMode: "on"}, "acme"), &memorySink{}
+	b.sink = sink
 	for range 2 {
-		server := mcp.NewServer(&mcp.Implementation{Name: long}, nil)
+		server := mcp.NewServer(impl, nil)
 		addLookup(server)
 		if err := b.Wrap(server); err != nil {
 			t.Fatal(err)
@@ -334,7 +316,7 @@ func TestWrapAddsTheVendorsMiddlewareOnceOnEveryPath(t *testing.T) {
 					return next(ctx, method, req)
 				}
 			}}
-			b, err := New(c.cfg)
+			b, err := New(testImpl, nil, c.cfg)
 			if (err != nil) != c.wantErr {
 				t.Fatalf("New returned error %v; want an error: %v", err, c.wantErr)
 			}
@@ -359,64 +341,30 @@ func TestWrapAddsTheVendorsMiddlewareOnceOnEveryPath(t *testing.T) {
 
 func TestASecondWrapWaitsForTheFirstToAddTheVendorsMiddleware(t *testing.T) {
 	var runs atomic.Int32
-	b, _ := newTestBaton(t, Config{Middleware: []mcp.Middleware{func(next mcp.MethodHandler) mcp.MethodHandler {
+	cfg := Config{ReportMode: "on", Middleware: []mcp.Middleware{func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			if method == "tools/call" {
 				runs.Add(1)
 			}
 			return next(ctx, method, req)
 		}
-	}}})
+	}}}
+	// A name that leaves no room for the report tool makes the first Wrap log
+	// before it adds the middleware, so holding that log holds the first Wrap.
+	b := configuredWith(t, &mcp.Implementation{Name: strings.Repeat("x", 3000)}, nil, cfg, "acme")
+	b.sink = &memorySink{}
+	captureLogs(t)
+	entered, release := heldLogs(t, "could not name the report tool")
 	server := newVectorServer()
 	addLookup(server)
-	probing, release := make(chan struct{}), make(chan struct{})
-	server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
-		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-			if p, ok := req.GetParams().(*mcp.InitializeParams); ok && p.ClientInfo != nil && p.ClientInfo.Name == "baton-probe" {
-				close(probing)
-				<-release
-			}
-			return next(ctx, method, req)
-		}
-	})
 	go b.Wrap(server)
-	<-probing
-	time.AfterFunc(100*time.Millisecond, func() { close(release) })
+	<-entered
+	time.AfterFunc(100*time.Millisecond, release)
 	if err := b.Wrap(server); err != nil {
 		t.Fatal(err)
 	}
 	call(t, connect(t, server), "lookup", map[string]any{"name": "a"})
 	if n := runs.Load(); n != 1 {
 		t.Errorf("the vendor's middleware ran %d times for a call after the second Wrap returned, want 1", n)
-	}
-}
-
-func TestWrapReturnsWhenAMiddlewareHoldsTheProbe(t *testing.T) {
-	captureLogs(t)
-	b, _ := newTestBaton(t, Config{})
-	server := newVectorServer()
-	hold := make(chan struct{})
-	t.Cleanup(func() { close(hold) })
-	server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
-		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-			if p, ok := req.GetParams().(*mcp.InitializeParams); ok && p.ClientInfo != nil && p.ClientInfo.Name == "baton-probe" {
-				<-hold
-			}
-			return next(ctx, method, req)
-		}
-	})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		var wg sync.WaitGroup
-		for range 2 {
-			wg.Go(func() { _ = b.Wrap(server) })
-		}
-		wg.Wait()
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Wrap is still waiting on a probe a middleware holds")
 	}
 }

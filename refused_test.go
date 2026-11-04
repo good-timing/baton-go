@@ -117,7 +117,7 @@ func TestTheVendorsMiddlewareRunsInsideBaton(t *testing.T) {
 }
 
 func TestANilMiddlewareIsAConfigError(t *testing.T) {
-	if _, err := configure(Config{Middleware: []mcp.Middleware{gate, nil}}); err == nil {
+	if _, err := configure(testImpl, nil, Config{Middleware: []mcp.Middleware{gate, nil}}); err == nil {
 		t.Error("want an error")
 	}
 }
@@ -150,7 +150,7 @@ func TestTheVendorsMiddlewareRunsWhenBatonIsNotInstalled(t *testing.T) {
 			server := newVectorServer()
 			addLookup(server)
 			c.cfg.Middleware = []mcp.Middleware{stopsAll}
-			_, _ = Install(server, c.cfg)
+			_, _ = Install(server, testImpl, nil, c.cfg)
 			if _, err := connect(t, server).CallTool(context.Background(), &mcp.CallToolParams{Name: "lookup", Arguments: map[string]any{"name": "a"}}); err == nil {
 				t.Error("the call got through: the vendor's middleware was not added")
 			}
@@ -334,7 +334,7 @@ func TestARefusedCallReachesTheVendorsSink(t *testing.T) {
 	out := &recordingSink{}
 	server := newVectorServer()
 	addLookup(server)
-	handle, err := Install(server, Config{VendorID: "acme", Sink: out, Middleware: []mcp.Middleware{stopsAll}})
+	handle, err := Install(server, testImpl, nil, Config{VendorID: "acme", Sink: out, Middleware: []mcp.Middleware{stopsAll}})
 	if err != nil {
 		t.Fatal(err)
 	}

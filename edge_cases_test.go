@@ -193,15 +193,12 @@ func TestInstructionsFollowWhatIsServed(t *testing.T) {
 // A vendor auth middleware that refuses callers with no token refuses Baton's
 // listing too, since it carries the caller's Extra. Baton must then conclude
 // nothing from the listing, and must not answer the annotate tool for a
-// refused caller. Refusing the probe's initialize must not stop Install.
+// refused caller.
 func TestARefusedListingConcludesNothing(t *testing.T) {
 	server := newVectorServer()
 	addLookup(server)
 	server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-			if init, ok := req.(*mcp.ServerRequest[*mcp.InitializeParams]); ok && init.Params.ClientInfo.Name == "baton-probe" {
-				return nil, errors.New("unauthenticated")
-			}
 			if method == "tools/list" && (req.GetExtra() == nil || req.GetExtra().TokenInfo == nil) {
 				return nil, errors.New("unauthenticated")
 			}
@@ -406,5 +403,36 @@ func TestProtocolMetaIsForwarded(t *testing.T) {
 	meta := ofType(sink.all(), "tool_call_start")[0].RuntimeMeta
 	if meta["io.modelcontextprotocol/protocolVersion"] != cs.InitializeResult().ProtocolVersion {
 		t.Errorf("runtime_meta = %v", meta)
+	}
+}
+
+// initializeParams asks for 2025-11-25, which every supported go-sdk answers
+// with an initialize result.
+func initializeParams(client string) *mcp.InitializeParams {
+	return &mcp.InitializeParams{
+		ProtocolVersion: "2025-11-25",
+		ClientInfo:      &mcp.Implementation{Name: client, Version: Version},
+		Capabilities:    &mcp.ClientCapabilities{},
+	}
+}
+
+// rawRequest sends one JSON-RPC request on conn and waits for its answer.
+func rawRequest(ctx context.Context, conn mcp.Connection, n int64, method string, params any) (*jsonrpc.Response, error) {
+	id, _ := jsonrpc.MakeID(float64(n))
+	raw, err := json.Marshal(params)
+	if err != nil {
+		return nil, err
+	}
+	if err := conn.Write(ctx, &jsonrpc.Request{ID: id, Method: method, Params: raw}); err != nil {
+		return nil, err
+	}
+	for {
+		msg, err := conn.Read(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if resp, ok := msg.(*jsonrpc.Response); ok && resp.ID == id {
+			return resp, nil
+		}
 	}
 }

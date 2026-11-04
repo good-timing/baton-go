@@ -29,8 +29,16 @@ func installWithSink(t *testing.T, cfg Config, register func(*mcp.Server)) (*mcp
 // installOn installs Baton on server as vendor "acme", with a memory sink.
 func installOn(t *testing.T, server *mcp.Server, cfg Config) *memorySink {
 	t.Helper()
+	return installBuiltWith(t, server, testImpl, nil, cfg)
+}
+
+// installBuiltWith is installOn for a server built with impl and opts.
+func installBuiltWith(t *testing.T, server *mcp.Server, impl *mcp.Implementation, opts *mcp.ServerOptions, cfg Config) *memorySink {
+	t.Helper()
 	mem := &memorySink{}
-	installAs(t, server, cfg, "acme", func() sink { return mem })
+	if _, err := configuredWith(t, impl, opts, cfg, "acme").install(server, func() sink { return mem }); err != nil {
+		t.Fatal(err)
+	}
 	return mem
 }
 
@@ -49,7 +57,12 @@ func installAs(t *testing.T, server *mcp.Server, cfg Config, vendorID string, op
 // workspace is vendorID too, with no sink yet.
 func configuredAs(t *testing.T, cfg Config, vendorID string) *Baton {
 	t.Helper()
-	b, err := configure(cfg)
+	return configuredWith(t, testImpl, nil, cfg, vendorID)
+}
+
+func configuredWith(t *testing.T, impl *mcp.Implementation, opts *mcp.ServerOptions, cfg Config, vendorID string) *Baton {
+	t.Helper()
+	b, err := configure(impl, opts, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,9 +233,10 @@ func TestRetiredNamesAreRecordedNotPassedOn(t *testing.T) {
 }
 
 func TestInstructionsGoAfterTheVendors(t *testing.T) {
-	server := mcp.NewServer(&mcp.Implementation{Name: "acme"}, &mcp.ServerOptions{Instructions: "Vendor text."})
+	impl, opts := &mcp.Implementation{Name: "acme"}, &mcp.ServerOptions{Instructions: "Vendor text."}
+	server := mcp.NewServer(impl, opts)
 	addLookup(server)
-	installOn(t, server, Config{ReportMode: "on"})
+	installBuiltWith(t, server, impl, opts, Config{ReportMode: "on"})
 	cs := connect(t, server)
 	got := cs.InitializeResult().Instructions
 	want := "Vendor text.\n\nUse `acme_annotate` to report a acme tool call that went wrong, or a request no tool covers; its description says when and how." + instructionsSubagentClause
@@ -241,9 +255,10 @@ func TestALibrarysPlaceholderNameIsNotUsed(t *testing.T) {
 			t.Errorf("%q gave %q, want %q", name, got, want)
 		}
 	}
-	server := mcp.NewServer(&mcp.Implementation{Name: "FastMCP"}, nil)
+	impl := &mcp.Implementation{Name: "FastMCP"}
+	server := mcp.NewServer(impl, nil)
 	addLookup(server)
-	installOn(t, server, Config{ReportMode: "on"})
+	installBuiltWith(t, server, impl, nil, Config{ReportMode: "on"})
 	cs := connect(t, server)
 	if got := cs.InitializeResult().Instructions; strings.Contains(got, "FastMCP") || !strings.Contains(got, "acme_annotate") {
 		t.Errorf("instructions = %q", got)
@@ -633,12 +648,12 @@ func TestScrubberFixedSets(t *testing.T) {
 func TestTheOffSwitchInstallsNothingAndChecksNothing(t *testing.T) {
 	for _, v := range []string{"1", "true", "yes", " ON "} {
 		t.Setenv("BATON_DISABLED", v)
-		if handle, err := Install(nil, Config{DSN: "not a dsn", ResultCapture: "bogus"}); err != nil || handle == nil {
+		if handle, err := Install(nil, testImpl, nil, Config{DSN: "not a dsn", ResultCapture: "bogus"}); err != nil || handle == nil {
 			t.Errorf("BATON_DISABLED=%q: handle %v, err %v", v, handle, err)
 		}
 		server := newVectorServer()
 		addLookup(server)
-		handle, err := Install(server, Config{DSN: testDSN, ReportMode: "on"})
+		handle, err := Install(server, testImpl, nil, Config{DSN: testDSN, ReportMode: "on"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -662,7 +677,7 @@ func TestTheOffSwitchInstallsNothingAndChecksNothing(t *testing.T) {
 		if v != "unset" {
 			t.Setenv("BATON_DISABLED", v)
 		}
-		if _, err := Install(newVectorServer(), Config{DSN: "not a dsn"}); err == nil {
+		if _, err := Install(newVectorServer(), testImpl, nil, Config{DSN: "not a dsn"}); err == nil {
 			t.Errorf("BATON_DISABLED=%q switched capture off", v)
 		}
 	}

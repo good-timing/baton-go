@@ -404,7 +404,7 @@ func TestInstallWithASinkUsesTheIdsInConfig(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "events.jsonl")
 			server := newVectorServer()
 			addLookup(server)
-			handle, err := Install(server, Config{Sink: FileSink(path), VendorID: "acme", TenantID: c.tenant})
+			handle, err := Install(server, testImpl, nil, Config{Sink: FileSink(path), VendorID: "acme", TenantID: c.tenant})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -445,7 +445,7 @@ func TestInstallPicksTheSinkFromConfig(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("BATON_DSN", c.env)
 			logs := captureLogs(t)
-			handle, err := Install(newVectorServer(), c.cfg)
+			handle, err := Install(newVectorServer(), testImpl, nil, c.cfg)
 			if c.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
 					t.Errorf("error %v, want %q", err, c.wantErr)

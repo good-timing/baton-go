@@ -36,10 +36,11 @@ func lookup(ctx context.Context, req *mcp.CallToolRequest, in lookupIn) (*mcp.Ca
 }
 
 func main() {
-	server := mcp.NewServer(&mcp.Implementation{Name: "your-vendor-mcp", Version: "1.0.0"}, nil)
+	impl := &mcp.Implementation{Name: "your-vendor-mcp", Version: "1.0.0"}
+	server := mcp.NewServer(impl, nil)
 	mcp.AddTool(server, &mcp.Tool{Name: "lookup"}, lookup)
 
-	handle, err := baton.Install(server, baton.Config{
+	handle, err := baton.Install(server, impl, nil, baton.Config{
 		DSN: "https://baton_pk_...@baton.goodtiming.ai/ten_.../your-vendor",
 	})
 	if err != nil {
@@ -52,6 +53,8 @@ func main() {
 	}
 }
 ```
+
+**Pass `Install` the same `impl` and options you gave `mcp.NewServer`** (the options may be nil in both places). Baton reads your server's name, version and instructions from them. It never calls your server to find them out. Keep `impl` and the options in variables, as above, so `mcp.NewServer` and `Install` get the same ones. A nil `impl` or an empty `impl.Name` is an error.
 
 Copy the DSN from **/account**. It packs four values: the collector to send to, your workspace, this server, and the key that binds them. The SDK unpacks them and sends to the collector itself. Tools added before and after `Install` are both captured.
 
@@ -68,7 +71,7 @@ Copy the DSN from **/account**. It packs four values: the collector to send to, 
 Without a collector, send events to a `Sink` instead of a DSN. Each event is one line of JSON.
 
 ```go
-handle, err := baton.Install(server, baton.Config{
+handle, err := baton.Install(server, impl, opts, baton.Config{
 	Sink:     baton.FileSink("events.jsonl"),
 	VendorID: "acme",
 	TenantID: "ten_0123abcd", // optional; unset, it is VendorID
@@ -95,6 +98,8 @@ handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return
 
 **Do not call `Install` per request.** Each `Install` starts its own sender, which runs until its `Close`, so a server built and installed per request leaks one per request. Use `New` and `Wrap` instead (next section).
 
+Your server's capabilities are sent once Baton sees a client's first `initialize` or `server/discover`. A stateless process may serve a tool call before that. Its first `surface_snapshot` then has no capabilities, and a second one with them follows.
+
 When the client sends no `Mcp-Session-Id`, each request is its own session. Signals that need several calls in one session, such as a retry loop, do not fire across requests. To see one person's requests together, return a principal from `ResolvePrincipal` ([Who is calling](#who-is-calling)).
 
 ## Servers built per request
@@ -102,23 +107,28 @@ When the client sends no `Mcp-Session-Id`, each request is its own session. Sign
 If your handler builds a new `*mcp.Server` for each request or session, make one `Baton` at startup and wrap each server:
 
 ```go
-b, err := baton.New(baton.Config{DSN: os.Getenv("BATON_DSN")})
+impl := &mcp.Implementation{Name: "your-vendor-mcp", Version: "1.0.0"}
+opts := &mcp.ServerOptions{Instructions: "..."} // or nil
+
+b, err := baton.New(impl, opts, baton.Config{DSN: os.Getenv("BATON_DSN")})
 if err != nil {
 	log.Fatal(err) // a config that is not valid
 }
 defer b.Close(context.Background())
 
 handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
-	s := newServer() // your AddTool lines
+	s := mcp.NewServer(impl, opts)
+	// your AddTool lines
 	b.Wrap(s)
 	return s
 }, &mcp.StreamableHTTPOptions{Stateless: true})
 ```
 
+- Build every server with the `impl` and `opts` you gave `New`. Servers with a different name need their own `Baton`.
 - Every wrapped server shares one sender and one sink, which `b.Close` closes.
 - `Wrap` never fails a request. It returns an error only for a nil server. A server already wrapped is skipped, so go-sdk asking for the same server twice is safe.
 - Pass your own middleware in `Config.Middleware`, as with `Install`. `Wrap` adds it to each server once, even when Baton records nothing. That happens with a config error from `New`, with no DSN, `Sink`, `VendorID` or `TenantID`, with `BATON_DISABLED=1`, or after `Close`. Do not add it again.
-- `Install(server, cfg)` is the one-server form; its handle's `Close` closes its sender.
+- `Install(server, impl, opts, cfg)` is the one-server form; its handle's `Close` closes its sender.
 
 ## What leaves your server
 
@@ -142,7 +152,7 @@ Only what crosses the MCP call. The SDK never reads your logs, your database or 
 **Nothing is captured about the person behind a call unless you say how to find them.** Pass `ResolvePrincipal`: it runs on every tool call, listing, prompt get and resource read, receives a `baton.Caller` (the verified token, the HTTP headers, `_meta`, the tool's name and its arguments), and returns a `*baton.Principal` or `nil`.
 
 ```go
-baton.Install(server, baton.Config{
+baton.Install(server, impl, opts, baton.Config{
 	DSN: "https://baton_pk_...@baton.goodtiming.ai/ten_.../your-vendor",
 	ResolvePrincipal: func(ctx context.Context, c baton.Caller) (*baton.Principal, error) {
 		if c.Token == nil || c.Token.UserID == "" {
@@ -178,7 +188,7 @@ For a tool made with `mcp.AddTool`, go-sdk checks the arguments against the inpu
 **A call your own middleware stops with an error** before the tool runs, such as an auth or credits check, is named `refused` when you give that middleware to Baton instead of adding it yourself:
 
 ```go
-handle, err := baton.Install(server, baton.Config{Middleware: []mcp.Middleware{auth}})
+handle, err := baton.Install(server, impl, opts, baton.Config{Middleware: []mcp.Middleware{auth}})
 ```
 
 Baton adds it inside its own middleware, so Baton sees every call, and a call that never got past your middleware is `refused`. Under `ResultCapture: "off"` its message is withheld, unless it is a `*baton.PublicError`. A call your middleware lets through is recorded with the `ctx` it passes on, so `ResolvePrincipal` sees what your auth put there. Call `next` before your middleware returns, not in a goroutine it leaves running, and pass on that `ctx` (or one made from it) or the same request. A call your middleware sends on twice, as a retry does, is recorded once, from the first try. If your middleware changes both the `ctx` and the request, Baton loses track of the call: it is recorded without what your auth set, and a failure of your tool is sent as `refused`. Your middleware also checks calls to Baton's annotation tool. It does not see the tool listings Baton makes for itself. When `Install` adds nothing (`BATON_DISABLED`, no DSN, or an error), it still adds your middleware, so your auth always runs; do not add it again.

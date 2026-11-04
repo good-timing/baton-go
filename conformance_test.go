@@ -30,8 +30,10 @@ func lookup(_ context.Context, _ *mcp.CallToolRequest, in lookupIn) (*mcp.CallTo
 	return nil, lookupOut{Found: true, Name: in.Name}, nil
 }
 
+var testImpl = &mcp.Implementation{Name: "spec-vector-generator"}
+
 func newVectorServer() *mcp.Server {
-	return mcp.NewServer(&mcp.Implementation{Name: "spec-vector-generator"}, nil)
+	return mcp.NewServer(testImpl, nil)
 }
 
 func connect(t *testing.T, server *mcp.Server) *mcp.ClientSession {
