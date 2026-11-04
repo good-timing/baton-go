@@ -43,19 +43,28 @@ const sdkVersion = "go-" + Version
 
 const defaultConsentToken = "customer-consented"
 
-type (
-	ResultCaptureMode string
-	IntentParamMode   string
-	ReportMode        string
-)
+// ResultCaptureMode is the type of Config.ResultCaptureMode. Empty means ResultCaptureFull.
+type ResultCaptureMode string
 
 const (
-	ResultCaptureFull   ResultCaptureMode = "full"
-	ResultCaptureOff    ResultCaptureMode = "off"
-	IntentParamRequired IntentParamMode   = "required"
-	IntentParamOptional IntentParamMode   = "optional"
-	ReportOn            ReportMode        = "on"
-	ReportOff           ReportMode        = "off"
+	ResultCaptureFull ResultCaptureMode = "full"
+	ResultCaptureOff  ResultCaptureMode = "off"
+)
+
+// IntentParamMode is the type of Config.IntentParamMode. Empty means IntentParamRequired.
+type IntentParamMode string
+
+const (
+	IntentParamRequired IntentParamMode = "required"
+	IntentParamOptional IntentParamMode = "optional"
+)
+
+// ReportMode is the type of Config.ReportMode. Empty means ReportOff.
+type ReportMode string
+
+const (
+	ReportOn  ReportMode = "on"
+	ReportOff ReportMode = "off"
 )
 
 type Config struct {

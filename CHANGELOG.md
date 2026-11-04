@@ -18,8 +18,8 @@
   `IntentParamMode` and `ReportMode`, with the values `ResultCaptureFull`,
   `ResultCaptureOff`, `IntentParamRequired`, `IntentParamOptional`, `ReportOn`
   and `ReportOff`. A value of another mode is a compile error. A quoted value
-  such as `"off"` still works; a `string` variable needs a conversion, such as
-  `baton.ReportMode(s)`.
+  such as `"off"` still works. A value of type `string`, or of another type,
+  needs a conversion, such as `baton.ReportMode(s)`.
 - **`Event`'s member types are exported:** `Event.Principal` and
   `Event.Organization` are `*Identity`, and `Event.ClientObserved` is
   `*ClientObserved` with `Info *ClientInfo`. Their fields and JSON are
