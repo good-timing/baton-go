@@ -282,8 +282,7 @@ func (b *installed) withUserGoal(t *mcp.Tool) *mcp.Tool {
 type callContext struct {
 	session     callSession
 	callID      string
-	principal   *Identity
-	org         *Identity
+	who         who
 	runtimeMeta map[string]any
 	client      *ClientObserved
 }
@@ -303,7 +302,7 @@ func (b *installed) newCallContext(ctx context.Context, r mcp.Request) callConte
 		session: b.sessions.resolve(session, header),
 	}
 	if b.cfg.ResolvePrincipal != nil {
-		cc.principal, cc.org = b.resolveCaller(ctx, func() Caller { return callerOf(r, header, token, meta) })
+		cc.who = b.resolveCaller(ctx, func() Caller { return callerOf(r, header, token, meta) })
 	}
 	cc.client = b.observeClient(meta, session, header)
 	if len(meta) > 0 {
@@ -668,8 +667,9 @@ func (b *installed) emit(cc callContext, eventType string, payload any) {
 		ConsentToken:      b.cfg.ConsentToken,
 		SDKVersion:        sdkVersion,
 		AgentRuntime:      "unknown",
-		Principal:         cc.principal,
-		Organization:      cc.org,
+		Principal:         cc.who.principal,
+		Organization:      cc.who.org,
+		Labels:            cc.who.labels,
 		CallID:            nonEmpty(cc.callID),
 		TransportObserved: cc.session.transport,
 		SessionIDOrigin:   &cc.session.origin,

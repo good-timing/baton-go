@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -22,12 +23,24 @@ type Principal struct {
 	// a real identity: a consumer treats anything not hashed as personal data.
 	Hashed       bool
 	Organization *Organization
+	// Labels are your names for the groups this caller is in, for the
+	// Console's settings to match (SPEC §11.4). They are sent as given, not
+	// scrubbed, so use group names or keys you keep, never raw ids. A
+	// Principal with Labels and no ID sends the labels alone. Sent with the
+	// Organization's Labels.
+	//
+	// Experimental: may change in a minor release.
+	Labels []string
 }
 
 type Organization struct {
 	ID          string
 	DisplayName string
 	Hashed      bool
+	// Labels are as Principal.Labels.
+	//
+	// Experimental: may change in a minor release.
+	Labels []string
 }
 
 // ResolvePrincipal names the caller of one request. Return nil for "no one".
@@ -127,21 +140,21 @@ var stuckHooks atomic.Int64
 // (SPEC §11.2). While hookCeiling timed-out ones still run, it is not called
 // (TestOnlyTimedOutResolversCountTowardTheCeiling); calls already waiting can
 // still add to them.
-func (b *installed) resolveCaller(ctx context.Context, caller func() Caller) (principal, org *Identity) {
+func (b *installed) resolveCaller(ctx context.Context, caller func() Caller) (w who) {
 	defer func() {
 		if r := recover(); r != nil {
 			logRecovered("baton: building the principal failed; the event carries no principal", r)
-			principal, org = nil, nil
+			w = who{}
 		}
 	}()
 	if stuckHooks.Load() >= hookCeiling {
 		b.hooksStuckWarned.Do(func() {
 			slog.Warn("baton: ResolvePrincipal calls are still running long after the limit, so it is not called until one ends; later warnings are not logged", "running", hookCeiling)
 		})
-		return nil, nil
+		return who{}
 	}
 	if ctx.Err() != nil {
-		return nil, nil
+		return who{}
 	}
 	c := caller()
 	hookCtx, cancel := context.WithTimeout(ctx, hookTimeout)
@@ -186,7 +199,7 @@ func (b *installed) resolveCaller(ctx context.Context, caller func() Caller) (pr
 		if state.CompareAndSwap(open, stuck) {
 			stuckHooks.Add(1)
 			b.warnSlowHook(ctx)
-			return nil, nil
+			return who{}
 		}
 		a = <-done
 	}
@@ -197,16 +210,45 @@ func (b *installed) resolveCaller(ctx context.Context, caller func() Caller) (pr
 		} else {
 			slog.Warn("baton: ResolvePrincipal failed; the event carries no principal", "error", a.err)
 		}
-		return nil, nil
+		return who{}
 	}
 	if a.p == nil {
-		return nil, nil
+		return who{}
 	}
-	principal = wireIdentity(a.p.ID, a.p.DisplayName, a.p.Hashed)
-	if a.p.Organization != nil {
-		org = wireIdentity(a.p.Organization.ID, a.p.Organization.DisplayName, a.p.Organization.Hashed)
+	w.principal = wireIdentity(a.p.ID, a.p.DisplayName, a.p.Hashed)
+	labels := a.p.Labels
+	if o := a.p.Organization; o != nil {
+		w.org = wireIdentity(o.ID, o.DisplayName, o.Hashed)
+		labels = slices.Concat(labels, o.Labels)
 	}
-	return principal, org
+	w.labels = cleanLabels(labels)
+	return w
+}
+
+// who is the caller as sent: principal, organization and labels.
+type who struct {
+	principal, org *Identity
+	labels         []string
+}
+
+const (
+	labelsCap   = 20
+	labelLength = 64
+)
+
+// cleanLabels keeps the usable labels in order, without repeats, at most
+// labelsCap; nil when none are left, as "labels" is never [] (SPEC §11.4).
+func cleanLabels(given []string) []string {
+	var out []string
+	for _, l := range given {
+		if len(out) == labelsCap {
+			break
+		}
+		if usableIdentityText(l) && utf8.RuneCountInString(l) <= labelLength && !slices.Contains(out, l) {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 // logRecovered logs a recovered panic. A log handler that panics on it would
