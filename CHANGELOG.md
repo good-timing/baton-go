@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1
 
 - **One Baton for many servers.** For a handler that builds a new
   `*mcp.Server` per request (like `create_baton` in Python and `createBaton`

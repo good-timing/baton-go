@@ -35,7 +35,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const Version = "0.2.0"
+const Version = "0.2.1"
 
 const sdkVersion = "go-" + Version
 
