@@ -24,7 +24,8 @@
   The vendor's middleware sees every `tools/list` and gets the vendor's own
   list back from `next`, as before; Baton adds `user_goal` and its annotation
   tool to the list the middleware returns. A listing it stops, or answers
-  without calling `next`, is recorded outside it, without what its auth set.
+  without calling `next`, is recorded and matched outside it, without what its
+  auth set.
   A listing it makes twice, or leaves running, is recorded once. The event's
   `count` is the list as Baton served it inside the middleware, before any
   filtering the middleware does. Baton's own listings still skip it. Without

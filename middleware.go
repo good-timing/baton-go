@@ -114,10 +114,17 @@ func (b *installed) startPassage(ctx context.Context, r mcp.Request, p *passage)
 // (TestAToolListIsMatchedWithWhatTheVendorsAuthSet), and adds Baton's tools
 // to the list the middleware returns, with that caller's settings: the
 // middleware may filter, replace or cache what next returned
-// (TestAToolListTheVendorsMiddlewareRebuildsGetsBatonsTools).
+// (TestAToolListTheVendorsMiddlewareRebuildsGetsBatonsTools). A listing the
+// middleware answers without calling next is matched with the outer ctx.
 func (b *installed) toolListThroughVendor(ctx context.Context, next mcp.MethodHandler, method string, req mcp.Request) (mcp.Result, error) {
 	start, end := b.lifecycleEvents(req, "tool_list")
-	var matched atomic.Pointer[callSettings]
+	// served is what run built: the vendor's list, the caller's settings, and
+	// that list with Baton's tools, reused when the middleware returns it as is.
+	type served struct {
+		list, withBaton mcp.Result
+		settings        callSettings
+	}
+	var inside atomic.Pointer[served]
 	pass := &passage{
 		method: method,
 		run: func(ctx context.Context, serve func(context.Context) (mcp.Result, error)) (mcp.Result, error) {
@@ -125,19 +132,16 @@ func (b *installed) toolListThroughVendor(ctx context.Context, next mcp.MethodHa
 				res mcp.Result
 				err error
 			)
-			// The event counts the list as served; the middleware gets the
-			// vendor's list, as it would without Baton.
 			_, _ = b.around(ctx, req, "tool_list", start, func(cc callContext) (mcp.Result, error) {
-				cs := cc.settings
-				matched.Store(&cs)
 				res, err = serve(ctx)
-				return b.withBatonTools(ctx, next, req, res, err, cs)
+				withBaton, werr := b.withBatonTools(ctx, next, req, res, err, cc.settings)
+				inside.Store(&served{res, withBaton, cc.settings})
+				return withBaton, werr
 			}, end)
 			return res, err
 		},
 	}
-	recordedOutside := false
-	res, err := b.throughVendor(ctx, next, method, req, pass,
+	res, err, recorded := b.throughVendor(ctx, next, method, req, pass, true,
 		func(resuming bool, res mcp.Result, err error, elapsed int64) (mcp.Result, error) {
 			var (
 				cc    callContext
@@ -148,40 +152,47 @@ func (b *installed) toolListThroughVendor(ctx context.Context, next mcp.MethodHa
 				start(&cc, resuming)
 				ready = true
 			})
-			recordedOutside = true
 			res, err = b.withBatonTools(ctx, next, req, res, err, cc.settings)
 			if ready {
 				guard("tool_list_end", func() { end(cc, res, err, elapsed) })
 			}
 			return res, err
 		})
-	if recordedOutside {
+	if recorded {
 		return res, err
 	}
-	var cs callSettings
-	if held := matched.Load(); held != nil {
-		cs = *held
+	s := inside.Load()
+	if s == nil {
+		return b.withBatonTools(ctx, next, req, res, err, callSettings{})
 	}
-	return b.withBatonTools(ctx, next, req, res, err, cs)
+	if err == nil && res == s.list {
+		return s.withBaton, nil
+	}
+	return b.withBatonTools(ctx, next, req, res, err, s.settings)
 }
 
 // throughVendor sends req through the vendor's middleware on pass. A request
 // the middleware never let through is handed to unreached, which records it
-// with the outer ctx's caller; claiming the passage first keeps a trip the
-// middleware leaves running from recording it again.
-func (b *installed) throughVendor(ctx context.Context, next mcp.MethodHandler, method string, req mcp.Request, pass *passage,
+// with the outer ctx's caller, and recorded is true. With claim, the passage
+// is claimed first, so a trip the middleware leaves running does not record
+// it again.
+func (b *installed) throughVendor(ctx context.Context, next mcp.MethodHandler, method string, req mcp.Request, pass *passage, claim bool,
 	unreached func(resuming bool, res mcp.Result, err error, elapsed int64) (mcp.Result, error),
-) (mcp.Result, error) {
+) (res mcp.Result, err error, recorded bool) {
 	passCtx, forget := b.startPassage(ctx, req, pass)
 	defer forget()
 	resuming := resumesAPause(req.GetParams())
 	began := time.Now()
-	res, err := next(passCtx, method, req)
+	res, err = next(passCtx, method, req)
 	elapsed := time.Since(began).Milliseconds()
-	if !paused(res) && pass.reached.CompareAndSwap(false, true) {
-		res, err = unreached(resuming, res, err, elapsed)
+	if paused(res) {
+		return res, err, false
 	}
-	return res, err
+	if claim && pass.reached.CompareAndSwap(false, true) || !claim && !pass.reached.Load() {
+		res, err = unreached(resuming, res, err, elapsed)
+		return res, err, true
+	}
+	return res, err, false
 }
 
 // guard keeps a Baton failure out of the vendor's request (SPEC §11.2).
@@ -542,7 +553,7 @@ func (b *installed) toolCall(ctx context.Context, next mcp.MethodHandler, method
 		pass := &passage{method: method, run: func(ctx context.Context, serve func(context.Context) (mcp.Result, error)) (mcp.Result, error) {
 			return b.around(ctx, r, "tool_call", sendStart, func(callContext) (mcp.Result, error) { return serve(ctx) }, sendEnd(nil))
 		}}
-		res, err = b.throughVendor(ctx, next, method, r, pass,
+		res, err, _ = b.throughVendor(ctx, next, method, r, pass, false,
 			func(resuming bool, res mcp.Result, err error, elapsed int64) (mcp.Result, error) {
 				guard("tool_call_refused", func() {
 					cc := b.newCallContext(ctx, r)

@@ -561,7 +561,9 @@ func TestAToolListTheVendorsMiddlewareCachesIsNotAClash(t *testing.T) {
 }
 
 func TestAToolListTheMiddlewareLeavesRunningIsRecordedOnce(t *testing.T) {
-	ran := make(chan struct{})
+	// The left-running listing waits until the client has its answer, so
+	// the listing the middleware answered has always been recorded first.
+	answered, ran := make(chan struct{}), make(chan struct{})
 	early := func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			if method != "tools/list" {
@@ -571,6 +573,7 @@ func TestAToolListTheMiddlewareLeavesRunningIsRecordedOnce(t *testing.T) {
 			refresh := &mcp.ListToolsRequest{Session: req.GetSession().(*mcp.ServerSession), Params: &mcp.ListToolsParams{}}
 			go func() {
 				defer close(ran)
+				<-answered
 				_, _ = next(ctx, method, refresh)
 			}()
 			return &mcp.ListToolsResult{Tools: []*mcp.Tool{}}, nil
@@ -578,6 +581,7 @@ func TestAToolListTheMiddlewareLeavesRunningIsRecordedOnce(t *testing.T) {
 	}
 	server, sink := installWithSink(t, Config{Middleware: []mcp.Middleware{early}}, addLookup)
 	listedTools(t, connect(t, server))
+	close(answered)
 	<-ran
 	if n := len(ofType(sink.all(), "tool_list_start")); n != 1 {
 		t.Errorf("%d tool_list_start, want 1", n)
