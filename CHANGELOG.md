@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 - **Breaking: `Install` and `New` take your server's `impl` and `opts`.**
   Every `Install` call changes, and so does 0.2.1's `New(cfg)`. This breaks
