@@ -3,6 +3,7 @@ package baton
 import (
 	"log/slog"
 	"regexp"
+	"strings"
 	"sync"
 )
 
@@ -23,25 +24,70 @@ var redactFieldNames = map[string]bool{
 type scrubRule struct {
 	re          *regexp.Regexp
 	replacement string
+	// mayMatch is false only for a string re cannot match
+	// (TestScrubStringMatchesFullScan). Go's regexp scans a long string
+	// slowly when nothing matches; mayMatch skips that scan.
+	mayMatch func(string) bool
 }
 
-func rule(category, pattern string) scrubRule {
-	return scrubRule{regexp.MustCompile(pattern), "[REDACTED:" + category + "]"}
+func rule(category, pattern string, mayMatch func(string) bool) scrubRule {
+	return scrubRule{regexp.MustCompile(pattern), "[REDACTED:" + category + "]", mayMatch}
+}
+
+func contains(sub string) func(string) bool {
+	return func(s string) bool { return strings.Contains(s, sub) }
 }
 
 // Order matters where patterns overlap: jwt before bearer, keys before email.
 var scrubRules = []scrubRule{
-	rule("jwt", `\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b`),
+	rule("jwt", `\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b`, contains("eyJ")),
 	// Only the word ignores case: (?i) on the token class would also match
 	// ſ and K (Kelvin). TestScrubberMatchesBatonSDKOnTheSpecCases pins it.
-	rule("bearer", `\b(?i:bearer)[`+wsChars+`]+[A-Za-z0-9_\-.+/=]{16,}`),
-	rule("sk_key", `\bsk-[A-Za-z0-9_\-]{20,}\b`),
-	rule("aws_key", `\bAKIA[0-9A-Z]{16}\b`),
-	rule("email", `\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b`),
-	rule("phone", `\b(?:\+?1[`+wsChars+`.\-]?)?\(?\d{3}\)?[`+wsChars+`.\-]?\d{3}[`+wsChars+`.\-]?\d{4}\b`),
+	rule("bearer", `\b(?i:bearer)[`+wsChars+`]+[A-Za-z0-9_\-.+/=]{16,}`, containsBearer),
+	rule("sk_key", `\bsk-[A-Za-z0-9_\-]{20,}\b`, contains("sk-")),
+	rule("aws_key", `\bAKIA[0-9A-Z]{16}\b`, contains("AKIA")),
+	rule("email", `\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b`, contains("@")),
+	rule("phone", `\b(?:\+?1[`+wsChars+`.\-]?)?\(?\d{3}\)?[`+wsChars+`.\-]?\d{3}[`+wsChars+`.\-]?\d{4}\b`, digitRun(4)),
 }
 
-var ccCandidate = regexp.MustCompile(`\b\d{13,19}\b`)
+var (
+	ccCandidate = regexp.MustCompile(`\b\d{13,19}\b`)
+	ccMayMatch  = digitRun(13)
+)
+
+// containsBearer is "bearer" in any ASCII case, all that (?i:bearer) matches:
+// none of its letters folds to a non-ASCII rune.
+func containsBearer(s string) bool {
+	const word = "bearer"
+outer:
+	for i := 0; i+len(word) <= len(s); i++ {
+		for j := range len(word) {
+			if s[i+j]|0x20 != word[j] {
+				continue outer
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// digitRun is whether a string has n ASCII digits in a row, as \d{n} needs.
+func digitRun(n int) func(string) bool {
+	return func(s string) bool {
+		run := 0
+		for i := 0; i < len(s); i++ {
+			if '0' <= s[i] && s[i] <= '9' {
+				run++
+				if run >= n {
+					return true
+				}
+			} else {
+				run = 0
+			}
+		}
+		return false
+	}
+}
 
 func luhnValid(digits string) bool {
 	total := 0
@@ -113,10 +159,17 @@ func pastDepthLimit() string {
 func scrubString(s string) string {
 	// Most strings match nothing; MatchString does not copy them.
 	for _, r := range scrubRules {
-		if r.re.MatchString(s) {
+		if r.mayMatch(s) && r.re.MatchString(s) {
 			s = r.re.ReplaceAllLiteralString(s, r.replacement)
 		}
 	}
+	if !ccMayMatch(s) {
+		return s
+	}
+	return redactCards(s)
+}
+
+func redactCards(s string) string {
 	if !ccCandidate.MatchString(s) {
 		return s
 	}

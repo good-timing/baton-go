@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **A large captured value adds much less time to its tool call.** The
+  default scrubber runs a pattern only when the text holds what that pattern
+  needs, such as an `@` for an email or 4 digits in a row for a phone number.
+  On a 50 KB result, a call's added time fell from about 4.7 ms to 0.09 ms
+  on plain text, and from 5.2 ms to 1.2 ms on JSON-like text with numbers.
+  What the scrubber redacts is unchanged.
+
 ## 0.2.1
 
 - **One Baton for many servers.** For a handler that builds a new
