@@ -210,10 +210,7 @@ func TestASnapshotWithoutCapabilitiesIsNeverSentAfterOneWithThem(t *testing.T) {
 	b, _ := newTestBaton(t, Config{})
 	held := &heldSink{writing: make(chan struct{}), release: make(chan struct{})}
 	b.sink = held
-	s, err := b.newServer()
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := b.newServer()
 	go s.maybeSnapshot(listing{{Name: "lookup", InputSchema: map[string]any{"type": "object"}}})
 	<-held.writing
 	stored := make(chan struct{})

@@ -101,16 +101,12 @@ const toolCacheCap = 4096
 // installed is one server's part of a Baton, freed with that server.
 type installed struct {
 	*Baton
-	displayName   string
-	annotateName  string
-	annotate      annotateTool
-	reportPointer string
-	sessions      *sessions
-	schemas       *lru[*mcp.Tool, map[string]any]
-	listed        *lru[*mcp.Tool, *mcp.Tool]
-	lastSurface   lastSurface
-	belowVendor   mcp.MethodHandler
-	passages      sync.Map // mcp.Request → *passage
+	sessions    *sessions
+	schemas     *lru[*mcp.Tool, map[string]any]
+	listed      *lru[*mcp.Tool, *mcp.Tool]
+	lastSurface lastSurface
+	belowVendor mcp.MethodHandler
+	passages    sync.Map // mcp.Request → *passage
 }
 
 // Install adds Baton to server. Pass the impl and opts server was built with:
@@ -147,7 +143,7 @@ func Install(server *mcp.Server, impl *mcp.Implementation, opts *mcp.ServerOptio
 	if openSink == nil {
 		return &Handle{}, nil
 	}
-	return b.install(server, openSink)
+	return b.install(server, openSink), nil
 }
 
 // settle checks cfg and says where events go: openSink is nil, after one
@@ -162,20 +158,26 @@ func settle(impl *mcp.Implementation, opts *mcp.ServerOptions, cfg Config) (b *B
 			"a DSN names the server and where its events go, so set one or the other")
 	}
 	if local {
-		openSink, err = b.settleLocally(cfg)
-		return b, openSink, err
+		if openSink, err = b.settleLocally(cfg); err != nil {
+			return nil, nil, err
+		}
+	} else {
+		raw := cmp.Or(cfg.DSN, os.Getenv("BATON_DSN"))
+		if raw == "" {
+			slog.Warn("baton: no DSN (Config.DSN or BATON_DSN) and no Sink or VendorID, so Baton is not installed and records nothing")
+			return b, nil, nil
+		}
+		d, err := parseDSN(raw)
+		if err != nil {
+			return nil, nil, err
+		}
+		b.vendorID, b.tenantID = d.vendorID, d.tenantID
+		openSink = func() sink { return newHTTPSink(d.origin, d.key) }
 	}
-	raw := cmp.Or(cfg.DSN, os.Getenv("BATON_DSN"))
-	if raw == "" {
-		slog.Warn("baton: no DSN (Config.DSN or BATON_DSN) and no Sink or VendorID, so Baton is not installed and records nothing")
-		return b, nil, nil
-	}
-	d, err := parseDSN(raw)
-	if err != nil {
+	if err := b.nameTheAnnotateTool(); err != nil {
 		return nil, nil, err
 	}
-	b.vendorID, b.tenantID = d.vendorID, d.tenantID
-	return b, func() sink { return newHTTPSink(d.origin, d.key) }, nil
+	return b, openSink, nil
 }
 
 func (b *Baton) settleLocally(cfg Config) (func() sink, error) {
@@ -194,27 +196,20 @@ func (b *Baton) settleLocally(cfg Config) (func() sink, error) {
 	return func() sink { return newQueueSink(out) }, nil
 }
 
-// install starts the sink last, after everything that can fail.
-func (b *Baton) install(server *mcp.Server, openSink func() sink) (*Handle, error) {
-	s, err := b.newServer()
-	if err != nil {
-		return nil, err
-	}
+func (b *Baton) install(server *mcp.Server, openSink func() sink) *Handle {
+	s := b.newServer()
 	b.sink = openSink()
 	s.attach(server)
-	return &Handle{b: s}, nil
+	return &Handle{b: s}
 }
 
-// newServer names the server's report tool. On a naming error the server is
-// still usable, without the report tool.
-func (b *Baton) newServer() (*installed, error) {
-	s := &installed{
+func (b *Baton) newServer() *installed {
+	return &installed{
 		Baton:    b,
 		sessions: newSessions(),
 		schemas:  newLRU[*mcp.Tool, map[string]any](toolCacheCap),
 		listed:   newLRU[*mcp.Tool, *mcp.Tool](toolCacheCap),
 	}
-	return s, s.nameTheAnnotateTool()
 }
 
 func (s *installed) attach(server *mcp.Server) {
@@ -329,11 +324,21 @@ func validToolName(cfg Config) error {
 // and renders the report pointer with them. The names must not depend on
 // any session: a stateless server lists tools in one request and calls them
 // in another, maybe in another process.
-func (b *installed) nameTheAnnotateTool() error {
-	chosen := nameTheVendorChose(b.serverName)
-	b.displayName = cmp.Or(b.cfg.VendorDisplayName, chosen, b.vendorID)
+func (b *Baton) nameTheAnnotateTool() error {
 	if b.cfg.ReportMode != "on" {
 		return nil
+	}
+	chosen := nameTheVendorChose(b.serverName)
+	displayName := cmp.Or(b.cfg.VendorDisplayName, chosen, b.vendorID)
+	if b.cfg.VendorDisplayName == "" && chosen != "" {
+		// A server name the vendor did not pass as display text must not stop
+		// the server (SPEC §5.1.1), so one too long gives way to the vendor id.
+		proposed := cmp.Or(b.cfg.AnnotationToolName, slugAnnotateName(chosen), b.vendorID+annotateSuffix)
+		if _, err := reportPointer(chosen, proposed); err != nil {
+			slog.Warn("baton: the server name is too long to name the server in Baton's instructions; using the vendor id. Set VendorDisplayName to a shorter name",
+				"tool", proposed, "vendor_id", b.vendorID)
+			displayName = b.vendorID
+		}
 	}
 	candidates := []string{b.cfg.AnnotationToolName}
 	if b.cfg.AnnotationToolName == "" {
@@ -347,16 +352,14 @@ func (b *installed) nameTheAnnotateTool() error {
 		if !toolNamePattern.MatchString(name) {
 			return fmt.Errorf("baton: annotation tool name %q must match %s", name, toolNamePattern)
 		}
-		if b.reportPointer, err = reportPointer(b.displayName, name); err == nil {
+		if b.reportPointer, err = reportPointer(displayName, name); err == nil {
 			b.annotateName = name
-			b.annotate = newAnnotateTool(name, b.displayName)
+			b.annotate = newAnnotateTool(name, displayName)
 			return nil
 		}
 		if i < len(candidates)-1 {
-			b.nameFitWarned.Do(func() {
-				slog.Warn("baton: the server-derived annotation tool name does not fit beside VendorDisplayName; using the vendor id",
-					"name", name)
-			})
+			slog.Warn("baton: the server-derived annotation tool name does not fit beside VendorDisplayName; using the vendor id",
+				"name", name)
 		}
 	}
 	return err

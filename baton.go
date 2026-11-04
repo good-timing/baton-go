@@ -25,6 +25,9 @@ type Baton struct {
 	seq                 *sequencer
 	sentSurfaces        *lru[string, struct{}]
 	serverName          string
+	annotateName        string
+	annotate            annotateTool
+	reportPointer       string
 	serverInfo          any
 	instructions        string
 	// capabilities is from the first initialize or server/discover answer:
@@ -43,9 +46,7 @@ type Baton struct {
 	paramsShapeWarned sync.Once
 	hooksStuckWarned  sync.Once
 	hookSlowWarned    sync.Once
-	nameFitWarned     sync.Once
 	nameDriftWarned   sync.Once
-	wrapFailWarned    sync.Once
 
 	closedWarned sync.Once
 	mu           sync.Mutex
@@ -54,16 +55,19 @@ type Baton struct {
 	// Baton must not keep a server built per request alive. Each value is
 	// closed once the first Wrap of that server has added its middleware.
 	wrapped map[weak.Pointer[mcp.Server]]chan struct{}
+	// beforeAttach, when set, runs in a first Wrap before it adds anything,
+	// so TestASecondWrapWaitsForTheFirstToAddTheVendorsMiddleware can hold it.
+	beforeAttach func()
 }
 
 // New checks cfg and starts the sender, for servers added later with Wrap.
 // Pass the impl and opts every wrapped server is built with; servers built
 // with different ones need a Baton each. opts may be nil. It returns an error
-// only for a config that is not valid, which includes a nil impl or an empty
-// impl.Name; a report tool that cannot be named is warned about at Wrap. With
-// a config error, no DSN, Sink, VendorID or TenantID, or BATON_DISABLED=1, it
-// returns a Baton that records nothing and whose Wrap adds only
-// Config.Middleware.
+// only for a config that is not valid, which includes a nil impl, an empty
+// impl.Name, or a VendorDisplayName that leaves no room for the report tool.
+// With a config error, no DSN, Sink, VendorID or TenantID, or
+// BATON_DISABLED=1, it returns a Baton that records nothing and whose Wrap
+// adds only Config.Middleware.
 func New(impl *mcp.Implementation, opts *mcp.ServerOptions, cfg Config) (*Baton, error) {
 	if captureDisabled() {
 		slog.Info("baton: BATON_DISABLED is set, so Baton is not installed and records nothing")
@@ -102,17 +106,14 @@ func (b *Baton) Wrap(server *mcp.Server) error {
 		return nil
 	}
 	defer close(added)
+	if b.beforeAttach != nil {
+		b.beforeAttach()
+	}
 	if !recording {
 		addVendorMiddleware(server, b.cfg.Middleware)
 		return nil
 	}
-	s, err := b.newServer()
-	if err != nil {
-		b.wrapFailWarned.Do(func() {
-			slog.Warn("baton: Wrap could not name the report tool, so this server runs without it (warned once)", "error", err)
-		})
-	}
-	s.attach(server)
+	b.newServer().attach(server)
 	return nil
 }
 

@@ -36,9 +36,7 @@ func installOn(t *testing.T, server *mcp.Server, cfg Config) *memorySink {
 func installBuiltWith(t *testing.T, server *mcp.Server, impl *mcp.Implementation, opts *mcp.ServerOptions, cfg Config) *memorySink {
 	t.Helper()
 	mem := &memorySink{}
-	if _, err := configuredWith(t, impl, opts, cfg, "acme").install(server, func() sink { return mem }); err != nil {
-		t.Fatal(err)
-	}
+	configuredWith(t, impl, opts, cfg, "acme").install(server, func() sink { return mem })
 	return mem
 }
 
@@ -46,11 +44,7 @@ func installBuiltWith(t *testing.T, server *mcp.Server, impl *mcp.Implementation
 // workspace is vendorID too, but with the sink open returns.
 func installAs(t *testing.T, server *mcp.Server, cfg Config, vendorID string, open func() sink) *Handle {
 	t.Helper()
-	handle, err := configuredAs(t, cfg, vendorID).install(server, open)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return handle
+	return configuredAs(t, cfg, vendorID).install(server, open)
 }
 
 // configuredAs is a Baton configured as for a DSN naming vendorID, whose
@@ -67,6 +61,9 @@ func configuredWith(t *testing.T, impl *mcp.Implementation, opts *mcp.ServerOpti
 		t.Fatal(err)
 	}
 	b.vendorID, b.tenantID = vendorID, vendorID
+	if err := b.nameTheAnnotateTool(); err != nil {
+		t.Fatal(err)
+	}
 	return b
 }
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **The report tool is named once, in `New`, not in every `Wrap`.** A
+  `VendorDisplayName` that leaves no room for the report tool is now a config
+  error from `New`, as it already was from `Install`. Before, each `Wrap` logged one warning and served the server
+  without the report tool.
+- **A server name too long for Baton's instructions no longer stops
+  `Install`.** With no `VendorDisplayName`, Baton names the server by its
+  vendor id instead and logs one warning, as baton-sdk does. Before,
+  `Install` returned an error, and `Wrap` served the server without the
+  report tool.
+
 ## 0.3.0
 
 - **Breaking: `Install` and `New` take your server's `impl` and `opts`.**

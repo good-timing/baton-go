@@ -260,32 +260,30 @@ func TestAServersOwnSessionIsNotInTheSharedCounter(t *testing.T) {
 	}
 }
 
-func TestWrapGoesOnWithoutTheReportToolWhenItCannotNameIt(t *testing.T) {
+func TestALongServerNameGivesWayToTheVendorID(t *testing.T) {
 	logs := captureLogs(t)
 	impl := &mcp.Implementation{Name: strings.Repeat("x", 3000)}
-	b, sink := configuredWith(t, impl, nil, Config{ReportMode: "on"}, "acme"), &memorySink{}
-	b.sink = sink
-	for range 2 {
-		server := mcp.NewServer(impl, nil)
-		addLookup(server)
-		if err := b.Wrap(server); err != nil {
-			t.Fatal(err)
-		}
-		cs := connect(t, server)
-		res, err := cs.ListTools(context.Background(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(res.Tools) != 1 {
-			t.Errorf("tools %v, want the vendor's only", res.Tools)
-		}
-		call(t, cs, "lookup", map[string]any{"name": "a"})
+	b, err := New(impl, nil, Config{ReportMode: "on", VendorID: "acme", Sink: &recordingSink{}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if n := strings.Count(logs.String(), "could not name the report tool"); n != 1 {
+	t.Cleanup(func() { b.Close(context.Background()) })
+	if !strings.Contains(b.reportPointer, "acme") || strings.Contains(b.reportPointer, impl.Name) {
+		t.Errorf("report pointer %q, want it to name the vendor id", b.reportPointer)
+	}
+	if n := strings.Count(logs.String(), "server name is too long"); n != 1 {
 		t.Errorf("%d warnings, want 1:\n%s", n, logs)
 	}
-	if n := len(ofType(sink.all(), "tool_call_start")); n != 2 {
-		t.Errorf("%d tool_call_start events, want 2", n)
+}
+
+func TestADisplayNameThatLeavesNoRoomForTheReportToolIsAConfigError(t *testing.T) {
+	t.Setenv("BATON_DISABLED", "")
+	cfg := Config{ReportMode: "on", VendorID: "acme", Sink: &recordingSink{}, VendorDisplayName: strings.Repeat("x", 3000)}
+	if _, err := New(testImpl, nil, cfg); err == nil {
+		t.Error("New returned no error")
+	}
+	if _, err := Install(newVectorServer(), testImpl, nil, cfg); err == nil {
+		t.Error("Install returned no error")
 	}
 }
 
@@ -341,25 +339,24 @@ func TestWrapAddsTheVendorsMiddlewareOnceOnEveryPath(t *testing.T) {
 
 func TestASecondWrapWaitsForTheFirstToAddTheVendorsMiddleware(t *testing.T) {
 	var runs atomic.Int32
-	cfg := Config{ReportMode: "on", Middleware: []mcp.Middleware{func(next mcp.MethodHandler) mcp.MethodHandler {
+	b, _ := newTestBaton(t, Config{Middleware: []mcp.Middleware{func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			if method == "tools/call" {
 				runs.Add(1)
 			}
 			return next(ctx, method, req)
 		}
-	}}}
-	// A name that leaves no room for the report tool makes the first Wrap log
-	// before it adds the middleware, so holding that log holds the first Wrap.
-	b := configuredWith(t, &mcp.Implementation{Name: strings.Repeat("x", 3000)}, nil, cfg, "acme")
-	b.sink = &memorySink{}
-	captureLogs(t)
-	entered, release := heldLogs(t, "could not name the report tool")
+	}}})
+	entered, release := make(chan struct{}), make(chan struct{})
+	b.beforeAttach = func() {
+		close(entered)
+		<-release
+	}
 	server := newVectorServer()
 	addLookup(server)
 	go b.Wrap(server)
 	<-entered
-	time.AfterFunc(100*time.Millisecond, release)
+	time.AfterFunc(100*time.Millisecond, func() { close(release) })
 	if err := b.Wrap(server); err != nil {
 		t.Fatal(err)
 	}
