@@ -21,13 +21,14 @@
 - **`tools/list` is recorded inside `Config.Middleware`,** as a tool call
   is. `ResolvePrincipal` sees what the vendor's auth set in `ctx`, so the
   Console's settings match the same caller on the tool list as on its calls.
-  What changes for the vendor's middleware: it saw every `tools/list` before
-  and still does, but the result it gets back from `next` now already has
-  `user_goal` in each schema and Baton's annotation tool; before, Baton added
-  them after the middleware returned. A listing the middleware stops, or
-  answers without calling `next`, is recorded and gets Baton's additions as
-  before. A listing it makes twice is recorded once. Baton's own listings
-  still skip it. Without `Config.Middleware` nothing changes.
+  The vendor's middleware sees every `tools/list` and gets the vendor's own
+  list back from `next`, as before; Baton adds `user_goal` and its annotation
+  tool to the list the middleware returns. A listing it stops, or answers
+  without calling `next`, is recorded outside it, without what its auth set.
+  A listing it makes twice, or leaves running, is recorded once. The event's
+  `count` is the list as Baton served it inside the middleware, before any
+  filtering the middleware does. Baton's own listings still skip it. Without
+  `Config.Middleware` nothing changes.
 - **Fixed:** a `Wrap` that panicked left its server marked as wrapped, so
   later `Wrap`s of it added nothing, and one already waiting returned as if
   the server were wrapped. The panic still propagates; the next `Wrap` adds

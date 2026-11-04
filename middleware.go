@@ -70,8 +70,6 @@ type passage struct {
 	// through, with the ctx that middleware passed on: serve calls the tool
 	// or lists the tools.
 	run func(ctx context.Context, serve func(context.Context) (mcp.Result, error)) (mcp.Result, error)
-	// again, when set, serves a second trip, which is not recorded again.
-	again func(ctx context.Context, serve func(context.Context) (mcp.Result, error)) (mcp.Result, error)
 }
 
 // innerMiddleware is the innermost middleware when Config.Middleware is set.
@@ -98,9 +96,6 @@ func (b *installed) innerMiddleware(next mcp.MethodHandler) mcp.MethodHandler {
 		if p.reached.Swap(true) {
 			// A retry, or a second request the vendor's middleware made with
 			// this ctx: recorded once (TestAMiddlewareThatRetriesRecordsTheCallOnce).
-			if p.again != nil {
-				return p.again(ctx, serve)
-			}
 			return serve(ctx)
 		}
 		return p.run(ctx, serve)
@@ -114,46 +109,68 @@ func (b *installed) startPassage(ctx context.Context, r mcp.Request, p *passage)
 	return context.WithValue(ctx, passageKey{}, p), func() { b.passages.Delete(r) }
 }
 
-// toolListThroughVendor records a tools/list and adds Baton's tools to it
-// inside the vendor's middleware, so ResolvePrincipal sees what its auth set
-// in ctx and the caller's settings shape the list
-// (TestAToolListIsMatchedWithWhatTheVendorsAuthSet).
+// toolListThroughVendor records a tools/list inside the vendor's
+// middleware, so ResolvePrincipal sees what its auth set in ctx
+// (TestAToolListIsMatchedWithWhatTheVendorsAuthSet), and adds Baton's tools
+// to the list the middleware returns, with that caller's settings: the
+// middleware may filter, replace or cache what next returned
+// (TestAToolListTheVendorsMiddlewareRebuildsGetsBatonsTools).
 func (b *installed) toolListThroughVendor(ctx context.Context, next mcp.MethodHandler, method string, req mcp.Request) (mcp.Result, error) {
 	start, end := b.lifecycleEvents(req, "tool_list")
-	var settings atomic.Pointer[callSettings]
+	var matched atomic.Pointer[callSettings]
 	pass := &passage{
 		method: method,
 		run: func(ctx context.Context, serve func(context.Context) (mcp.Result, error)) (mcp.Result, error) {
-			return b.around(ctx, req, "tool_list", start, func(cc callContext) (mcp.Result, error) {
+			var (
+				res mcp.Result
+				err error
+			)
+			// The event counts the list as served; the middleware gets the
+			// vendor's list, as it would without Baton.
+			_, _ = b.around(ctx, req, "tool_list", start, func(cc callContext) (mcp.Result, error) {
 				cs := cc.settings
-				settings.Store(&cs)
-				res, err := serve(ctx)
+				matched.Store(&cs)
+				res, err = serve(ctx)
 				return b.withBatonTools(ctx, next, req, res, err, cs)
 			}, end)
-		},
-		again: func(ctx context.Context, serve func(context.Context) (mcp.Result, error)) (mcp.Result, error) {
-			var cs callSettings
-			if held := settings.Load(); held != nil {
-				cs = *held
-			}
-			res, err := serve(ctx)
-			return b.withBatonTools(ctx, next, req, res, err, cs)
+			return res, err
 		},
 	}
-	return b.throughVendor(ctx, next, method, req, pass, "tool_list_unreached",
-		func(cc *callContext, resuming bool, res mcp.Result, err error, elapsed int64) (mcp.Result, error) {
-			start(cc, resuming)
+	recordedOutside := false
+	res, err := b.throughVendor(ctx, next, method, req, pass,
+		func(resuming bool, res mcp.Result, err error, elapsed int64) (mcp.Result, error) {
+			var (
+				cc    callContext
+				ready bool
+			)
+			guard("tool_list_start", func() {
+				cc = b.newCallContext(ctx, req)
+				start(&cc, resuming)
+				ready = true
+			})
+			recordedOutside = true
 			res, err = b.withBatonTools(ctx, next, req, res, err, cc.settings)
-			end(*cc, res, err, elapsed)
+			if ready {
+				guard("tool_list_end", func() { end(cc, res, err, elapsed) })
+			}
 			return res, err
 		})
+	if recordedOutside {
+		return res, err
+	}
+	var cs callSettings
+	if held := matched.Load(); held != nil {
+		cs = *held
+	}
+	return b.withBatonTools(ctx, next, req, res, err, cs)
 }
 
 // throughVendor sends req through the vendor's middleware on pass. A request
-// the middleware never let through is handed to unreached, with the outer
-// ctx's caller.
-func (b *installed) throughVendor(ctx context.Context, next mcp.MethodHandler, method string, req mcp.Request, pass *passage, step string,
-	unreached func(cc *callContext, resuming bool, res mcp.Result, err error, elapsed int64) (mcp.Result, error),
+// the middleware never let through is handed to unreached, which records it
+// with the outer ctx's caller; claiming the passage first keeps a trip the
+// middleware leaves running from recording it again.
+func (b *installed) throughVendor(ctx context.Context, next mcp.MethodHandler, method string, req mcp.Request, pass *passage,
+	unreached func(resuming bool, res mcp.Result, err error, elapsed int64) (mcp.Result, error),
 ) (mcp.Result, error) {
 	passCtx, forget := b.startPassage(ctx, req, pass)
 	defer forget()
@@ -161,11 +178,8 @@ func (b *installed) throughVendor(ctx context.Context, next mcp.MethodHandler, m
 	began := time.Now()
 	res, err := next(passCtx, method, req)
 	elapsed := time.Since(began).Milliseconds()
-	if !pass.reached.Load() && !paused(res) {
-		guard(step, func() {
-			cc := b.newCallContext(ctx, req)
-			res, err = unreached(&cc, resuming, res, err, elapsed)
-		})
+	if !paused(res) && pass.reached.CompareAndSwap(false, true) {
+		res, err = unreached(resuming, res, err, elapsed)
 	}
 	return res, err
 }
@@ -528,10 +542,13 @@ func (b *installed) toolCall(ctx context.Context, next mcp.MethodHandler, method
 		pass := &passage{method: method, run: func(ctx context.Context, serve func(context.Context) (mcp.Result, error)) (mcp.Result, error) {
 			return b.around(ctx, r, "tool_call", sendStart, func(callContext) (mcp.Result, error) { return serve(ctx) }, sendEnd(nil))
 		}}
-		res, err = b.throughVendor(ctx, next, method, r, pass, "tool_call_refused",
-			func(cc *callContext, resuming bool, res mcp.Result, err error, elapsed int64) (mcp.Result, error) {
-				sendStart(cc, resuming)
-				sendEnd(ptr("refused"))(*cc, res, err, elapsed)
+		res, err = b.throughVendor(ctx, next, method, r, pass,
+			func(resuming bool, res mcp.Result, err error, elapsed int64) (mcp.Result, error) {
+				guard("tool_call_refused", func() {
+					cc := b.newCallContext(ctx, r)
+					sendStart(&cc, resuming)
+					sendEnd(ptr("refused"))(cc, res, err, elapsed)
+				})
 				return res, err
 			})
 	}

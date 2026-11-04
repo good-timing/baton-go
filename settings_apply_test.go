@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -492,5 +493,93 @@ func TestAToolListThroughAMiddlewareThatDropsTheCtxIsStillMatched(t *testing.T) 
 	}
 	if len(ofType(sink.all(), "tool_list_start")) != 1 {
 		t.Errorf("events: %v", eventTypes(sink.all()))
+	}
+}
+
+func TestAToolListTheVendorsMiddlewareRebuildsGetsBatonsTools(t *testing.T) {
+	for name, mw := range map[string]mcp.Middleware{
+		"replaces": func(next mcp.MethodHandler) mcp.MethodHandler {
+			return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+				res, err := next(ctx, method, req)
+				if method == "tools/list" {
+					return &mcp.ListToolsResult{Tools: []*mcp.Tool{{Name: "lookup", InputSchema: map[string]any{"type": "object"}}}}, err
+				}
+				return res, err
+			}
+		},
+		"filters": func(next mcp.MethodHandler) mcp.MethodHandler {
+			return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+				res, err := next(ctx, method, req)
+				if list, ok := res.(*mcp.ListToolsResult); ok {
+					kept := *list
+					kept.Tools = slices.DeleteFunc(slices.Clone(list.Tools), func(tool *mcp.Tool) bool { return tool.Name != "lookup" })
+					return &kept, err
+				}
+				return res, err
+			}
+		},
+	} {
+		b, _ := holding(t, Config{ReportMode: ReportOn, Middleware: []mcp.Middleware{mw}}, "")
+		tools := listedTools(t, connect(t, wrapped(t, b, addLookup)))
+		if _, ok := tools[b.annotateName]; !ok || !goalRequired(t, tools["lookup"]) {
+			t.Errorf("%s: Baton's tools are missing from %v", name, slices.Collect(maps.Keys(tools)))
+		}
+	}
+}
+
+func TestAToolListTheVendorsMiddlewareCachesIsNotAClash(t *testing.T) {
+	logs := captureLogs(t)
+	var cached atomic.Pointer[mcp.ListToolsResult]
+	cache := func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method != "tools/list" {
+				return next(ctx, method, req)
+			}
+			if held := cached.Load(); held != nil {
+				return held, nil
+			}
+			res, err := next(ctx, method, req)
+			if list, ok := res.(*mcp.ListToolsResult); ok {
+				cached.Store(list)
+			}
+			return res, err
+		}
+	}
+	b, sink := holding(t, Config{ReportMode: ReportOn, Middleware: []mcp.Middleware{cache}}, "")
+	cs := connect(t, wrapped(t, b, addLookup))
+	for range 2 {
+		if _, ok := listedTools(t, cs)[b.annotateName]; !ok {
+			t.Error("the report tool is missing")
+		}
+	}
+	if strings.Contains(logs.String(), "has the annotation tool's name") {
+		t.Errorf("Baton's own tool was taken for the vendor's:\n%s", logs)
+	}
+	if n := len(ofType(sink.all(), "tool_list_start")); n != 2 {
+		t.Errorf("%d tool_list_start, want 2", n)
+	}
+}
+
+func TestAToolListTheMiddlewareLeavesRunningIsRecordedOnce(t *testing.T) {
+	ran := make(chan struct{})
+	early := func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method != "tools/list" {
+				return next(ctx, method, req)
+			}
+			// A request of its own: go-sdk writes to the one it serves.
+			refresh := &mcp.ListToolsRequest{Session: req.GetSession().(*mcp.ServerSession), Params: &mcp.ListToolsParams{}}
+			go func() {
+				defer close(ran)
+				_, _ = next(ctx, method, refresh)
+			}()
+			return &mcp.ListToolsResult{Tools: []*mcp.Tool{}}, nil
+		}
+	}
+	server, sink := installWithSink(t, Config{Middleware: []mcp.Middleware{early}}, addLookup)
+	listedTools(t, connect(t, server))
+	<-ran
+	if n := len(ofType(sink.all(), "tool_list_start")); n != 1 {
+		t.Errorf("%d tool_list_start, want 1", n)
 	}
 }
