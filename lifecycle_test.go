@@ -123,7 +123,7 @@ func TestBatonsOwnListingsAreNotRecorded(t *testing.T) {
 // SPEC §11.4.4: under "off" these error legs keep their message and carry no
 // result_capture, so the vendor is told once, when it configures the mode.
 func TestUnderResultCaptureOffAFailedRequestKeepsItsMessage(t *testing.T) {
-	for _, capture := range []string{"full", "off"} {
+	for _, capture := range []ResultCaptureMode{ResultCaptureFull, ResultCaptureOff} {
 		logs := captureLogs(t)
 		server, sink := installWithSink(t, Config{ResultCaptureMode: capture}, addPromptsAndResources)
 		_, _ = connect(t, server).GetPrompt(context.Background(), &mcp.GetPromptParams{Name: "broken"})
@@ -132,7 +132,7 @@ func TestUnderResultCaptureOffAFailedRequestKeepsItsMessage(t *testing.T) {
 			t.Errorf("%s: payload %v", capture, got)
 		}
 		for _, leg := range []string{"tool_list_error", "prompt_list_error", "prompt_get_error", "resource_list_error", "resource_read_error"} {
-			if warned := strings.Count(logs.String(), leg); warned != map[string]int{"full": 0, "off": 1}[capture] {
+			if warned := strings.Count(logs.String(), leg); warned != map[ResultCaptureMode]int{ResultCaptureFull: 0, ResultCaptureOff: 1}[capture] {
 				t.Errorf("%s: %s warned %d times", capture, leg, warned)
 			}
 		}

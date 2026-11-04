@@ -555,7 +555,7 @@ func errorType(err error) string {
 	}
 }
 
-func (b *installed) withholding() bool { return b.cfg.ResultCaptureMode == "off" }
+func (b *installed) withholding() bool { return b.cfg.ResultCaptureMode == ResultCaptureOff }
 
 func contentText(content []mcp.Content) string {
 	var parts []string

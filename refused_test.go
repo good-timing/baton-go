@@ -49,7 +49,7 @@ func TestACallTheVendorsMiddlewareStopsIsRefused(t *testing.T) {
 		{"nope", nil, "unknown_tool"},
 		{"lookup", map[string]any{"name": 5}, "invalid_argument"},
 	}
-	for _, capture := range []string{"full", "off"} {
+	for _, capture := range []ResultCaptureMode{ResultCaptureFull, ResultCaptureOff} {
 		server, sink := installWithSink(t, Config{ResultCaptureMode: capture, Middleware: []mcp.Middleware{gate}}, addGatedTools)
 		cs := connect(t, server)
 		for _, c := range cases {

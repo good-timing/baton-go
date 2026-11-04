@@ -43,14 +43,19 @@ const sdkVersion = "go-" + Version
 
 const defaultConsentToken = "customer-consented"
 
-// The values of Config.ResultCaptureMode, IntentParamMode and ReportMode.
+type (
+	ResultCaptureMode string
+	IntentParamMode   string
+	ReportMode        string
+)
+
 const (
-	ResultCaptureFull   = "full"
-	ResultCaptureOff    = "off"
-	IntentParamRequired = "required"
-	IntentParamOptional = "optional"
-	ReportOn            = "on"
-	ReportOff           = "off"
+	ResultCaptureFull   ResultCaptureMode = "full"
+	ResultCaptureOff    ResultCaptureMode = "off"
+	IntentParamRequired IntentParamMode   = "required"
+	IntentParamOptional IntentParamMode   = "optional"
+	ReportOn            ReportMode        = "on"
+	ReportOff           ReportMode        = "off"
 )
 
 type Config struct {
@@ -70,14 +75,14 @@ type Config struct {
 	ConsentToken      string
 	// ResultCaptureMode is ResultCaptureFull (default) or ResultCaptureOff,
 	// which withholds results and error text (SPEC §11.4).
-	ResultCaptureMode string
+	ResultCaptureMode ResultCaptureMode
 	// IntentParamMode is IntentParamRequired (default) or IntentParamOptional:
 	// whether each tool's listed schema marks user_goal required. Nothing
 	// enforces it.
-	IntentParamMode string
+	IntentParamMode IntentParamMode
 	// ReportMode ReportOn adds the tool an agent reports problems with;
 	// ReportOff (default) adds none.
-	ReportMode         string
+	ReportMode         ReportMode
 	AnnotationToolName string
 	// Scrubber is applied to every captured value. Nil means DefaultScrubber;
 	// NoScrub turns it off.
@@ -260,7 +265,7 @@ func captureDisabled() bool {
 	return true
 }
 
-func oneOf(field, value string, allowed ...string) error {
+func oneOf[M ~string](field string, value M, allowed ...M) error {
 	if slices.Contains(allowed, value) {
 		return nil
 	}
@@ -300,14 +305,14 @@ func configure(impl *mcp.Implementation, opts *mcp.ServerOptions, cfg Config) (*
 	if opts != nil {
 		b.instructions = opts.Instructions
 	}
-	if cfg.IntentParamMode == "required" {
+	if cfg.IntentParamMode == IntentParamRequired {
 		b.requiredNames = []string{userGoalParam}
 	}
-	if cfg.ReportMode != "on" && cfg.AnnotationToolName != "" {
+	if cfg.ReportMode != ReportOn && cfg.AnnotationToolName != "" {
 		slog.Warn(`baton: AnnotationToolName has no effect with ReportMode "off", because no annotation tool is served`,
 			"name", cfg.AnnotationToolName)
 	}
-	if cfg.ResultCaptureMode == "off" {
+	if cfg.ResultCaptureMode == ResultCaptureOff {
 		slog.Warn(`baton: ResultCaptureMode "off" does not withhold the message of a failed listing, prompt or resource request. ` +
 			"tool_list_error, prompt_list_error, prompt_get_error, resource_list_error and resource_read_error carry that message, " +
 			"which can include text your handler returned. Return a message that names the resource, not its contents.")
@@ -325,7 +330,7 @@ func namedServer(impl *mcp.Implementation) error {
 // validToolName checks the report tool's name when the tool is served, as
 // baton-sdk does (TestWithoutADSNABadSettingStillFails).
 func validToolName(cfg Config) error {
-	if cfg.ReportMode == "on" && cfg.AnnotationToolName != "" && !toolNamePattern.MatchString(cfg.AnnotationToolName) {
+	if cfg.ReportMode == ReportOn && cfg.AnnotationToolName != "" && !toolNamePattern.MatchString(cfg.AnnotationToolName) {
 		return fmt.Errorf("baton: AnnotationToolName %q must match %s", cfg.AnnotationToolName, toolNamePattern)
 	}
 	return nil
@@ -336,7 +341,7 @@ func validToolName(cfg Config) error {
 // any session: a stateless server lists tools in one request and calls them
 // in another, maybe in another process.
 func (b *Baton) nameTheAnnotateTool() error {
-	if b.cfg.ReportMode != "on" {
+	if b.cfg.ReportMode != ReportOn {
 		return nil
 	}
 	chosen := nameTheVendorChose(b.serverName)

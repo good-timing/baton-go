@@ -39,8 +39,8 @@ const contextField = "  - context: supplementary info not covered above. Common 
 	"downstream_blocked, confidence_in_intent. When no tool covers the " +
 	"request also missing_capability_field and requested_capability."
 
-func userGoalDescription(mode string) string {
-	if mode == "required" {
+func userGoalDescription(mode IntentParamMode) string {
+	if mode == IntentParamRequired {
 		return "REQUIRED. " + userGoalParamBody
 	}
 	return "OPTIONAL. " + userGoalParamBody

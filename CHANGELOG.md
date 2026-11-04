@@ -14,9 +14,12 @@
   ```
 
   The error for a value that is not allowed names the new field.
-- **Named values for the modes:** `ResultCaptureFull`, `ResultCaptureOff`,
-  `IntentParamRequired`, `IntentParamOptional`, `ReportOn` and `ReportOff`.
-  They are plain strings, so `"off"` still works.
+- **Breaking: each mode has its own type,** `ResultCaptureMode`,
+  `IntentParamMode` and `ReportMode`, with the values `ResultCaptureFull`,
+  `ResultCaptureOff`, `IntentParamRequired`, `IntentParamOptional`, `ReportOn`
+  and `ReportOff`. A value of another mode is a compile error. A quoted value
+  such as `"off"` still works; a `string` variable needs a conversion, such as
+  `baton.ReportMode(s)`.
 - **`Event`'s member types are exported:** `Event.Principal` and
   `Event.Organization` are `*Identity`, and `Event.ClientObserved` is
   `*ClientObserved` with `Info *ClientInfo`. Their fields and JSON are

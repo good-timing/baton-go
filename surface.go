@@ -56,7 +56,7 @@ func (b *installed) maybeSnapshot(l listing) {
 			IntentParam: intentParam{
 				Names:         []string{userGoalParam},
 				RequiredNames: b.requiredNames,
-				Mode:          b.cfg.IntentParamMode,
+				Mode:          string(b.cfg.IntentParamMode),
 			},
 			InstructionsSuffix: b.ourInstructions(l) != "",
 		},

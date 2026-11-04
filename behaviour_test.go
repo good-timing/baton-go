@@ -197,7 +197,7 @@ func TestGoSDKsOwnChecksAreNamed(t *testing.T) {
 		{"unencodable", "output_schema_mismatch", "marshaling output"},
 		{"raw", "<absent>", "marshaling output"},
 	}
-	for _, capture := range []string{"full", "off"} {
+	for _, capture := range []ResultCaptureMode{ResultCaptureFull, ResultCaptureOff} {
 		server, sink := installWithSink(t, Config{ResultCaptureMode: capture}, register)
 		cs := connect(t, server)
 		for _, c := range cases {
@@ -212,7 +212,7 @@ func TestGoSDKsOwnChecksAreNamed(t *testing.T) {
 			if deref(p.FailureKind) != c.kind {
 				t.Errorf("%s %s: failure_kind %q, want %q", capture, c.tool, deref(p.FailureKind), c.kind)
 			}
-			if kept, wantKept := strings.HasPrefix(deref(p.ErrorBody), c.body), capture == "full"; kept != wantKept {
+			if kept, wantKept := strings.HasPrefix(deref(p.ErrorBody), c.body), capture == ResultCaptureFull; kept != wantKept {
 				t.Errorf("%s %s: error_body %q; kept should be %v", capture, c.tool, deref(p.ErrorBody), wantKept)
 			}
 		}
