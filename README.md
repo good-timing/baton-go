@@ -197,13 +197,14 @@ baton.Install(server, impl, opts, baton.Config{
 })
 ```
 
-- It needs a DSN, and reads with the DSN's key. With `Sink`, `VendorID` or `TenantID` it is an error.
+- It needs a DSN, and reads with the DSN's key. With no DSN, or with `Sink`, `VendorID` or `TenantID`, it is an error.
 - Baton reads the settings once in the background when it starts, then every `SettingsRefresh`: 60 seconds when zero, and at least 15. A call never waits for a read. Until the first read succeeds, and when nothing is saved, the values in your `Config` apply. A failed or unreadable answer keeps the settings Baton holds.
 - `results` applies from the next call. `goal` and `reports` apply from the next `tools/list`. With `reports` off for a caller, the report tool is left out of their tool list, but it still accepts a report.
 - `ReportMode` is `baton.ReportOn` unless you set it, so the Console can turn reports off for some callers. With `ReportMode: baton.ReportOff` there is no report tool to turn on.
 - The server instructions go out once per connection, so they point to the report tool while some caller can get it.
 - One `New` reads once for every server it wraps. `Close` stops the reads.
-- Each event says which settings it ran under in `capture`: the settings' version and the matched audience.
+- Once settings are held, each event says which settings it ran under in `capture`: the settings' version and the matched audience.
+- A `tools/list` is matched before your `Config.Middleware` runs, and a tool call after it. So a label your `ResolvePrincipal` reads from what your auth put in `ctx` applies to calls, not to the tool list. To match the tool list too, read the caller from `c.Token` or `c.Header`.
 
 **Labels** are your names for the groups a caller is in, such as `beta` or one unguessable key per customer, for the Console's settings to match. Return them in `Principal.Labels` and `Organization.Labels`. A `Principal` with labels and no `ID` sends the labels alone. They ride each event in `labels`, at most 20 of up to 64 characters each. They are sent as you return them, not scrubbed, so never put a raw id in one.
 

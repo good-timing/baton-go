@@ -346,6 +346,7 @@ func TestBadSettingsAreRefused(t *testing.T) {
 	}{
 		{Config{DSN: testDSN, Settings: "cloud"}, `Config.Settings is "cloud"; use one of ["local" "console"]`},
 		{Config{VendorID: "srv", Settings: SettingsConsole}, "needs a DSN"},
+		{Config{Settings: SettingsConsole}, "needs a DSN"},
 		{Config{DSN: testDSN, SettingsRefresh: 5 * time.Second}, "at least 15s"},
 		{Config{DSN: testDSN, SettingsRefresh: -time.Minute}, "at least 15s"},
 	} {

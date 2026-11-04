@@ -323,8 +323,7 @@ func (b *installed) newCallContext(ctx context.Context, r mcp.Request) callConte
 	}
 	cc.client = b.observeClient(meta, session, header)
 	if doc := b.settings.document(); doc != nil {
-		// A failure here leaves the Config's values for this call.
-		guard("capture settings", func() { cc.settings = doc.settingsFor(cc.matchView(), b.vendorID) })
+		cc.settings = b.settingsFor(doc, cc)
 	}
 	if len(meta) > 0 {
 		meta, _ := jsonValue(map[string]any(meta)).(map[string]any)
@@ -332,6 +331,18 @@ func (b *installed) newCallContext(ctx context.Context, r mcp.Request) callConte
 		cc.runtimeMeta, _ = b.scrubOrNil(roundMetaCoordinates(meta), "runtime_meta").(map[string]any)
 	}
 	return cc
+}
+
+// settingsFor leaves the Config's values for a call whose matching fails.
+// No event is lost, so it is not counted as a drop, as guard would.
+func (b *installed) settingsFor(doc *settingsDocument, cc callContext) (s callSettings) {
+	defer func() {
+		if r := recover(); r != nil {
+			logRecovered("baton: applying capture settings failed; this call uses the Config's values", r)
+			s = callSettings{}
+		}
+	}()
+	return doc.settingsFor(cc.matchView(), b.vendorID)
 }
 
 func (cc callContext) matchView() matchView {

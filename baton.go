@@ -111,8 +111,7 @@ func (b *Baton) Wrap(server *mcp.Server) error {
 		// middleware, which may be their auth, is on it.
 		<-added
 		if !b.claimedBy(server, added) {
-			// The first Wrap panicked and added nothing
-			// (TestAWrapWaitingOnOneThatPanicsWrapsTheServer).
+			// The first Wrap panicked (TestAWrapWaitingOnOneThatPanicsWrapsTheServer).
 			return b.Wrap(server)
 		}
 		return nil
@@ -120,7 +119,9 @@ func (b *Baton) Wrap(server *mcp.Server) error {
 	defer close(added)
 	// A panic propagates: recovering it would serve requests without the
 	// vendor's middleware. The server is left unclaimed, so a later Wrap
-	// tries again (TestAWrapThatPanicsLeavesTheServerUnwrapped).
+	// tries again and, if a middleware's constructor panicked, fails the same
+	// way rather than serve without it (TestAWrapThatPanicsLeavesTheServerUnwrapped,
+	// TestAMiddlewareThatPanicsWhenAddedFailsEveryWrap).
 	attached := false
 	defer func() {
 		if !attached {

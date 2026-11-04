@@ -393,6 +393,23 @@ func TestAWrapThatPanicsLeavesTheServerUnwrapped(t *testing.T) {
 	}
 }
 
+func TestAMiddlewareThatPanicsWhenAddedFailsEveryWrap(t *testing.T) {
+	panics := func(mcp.MethodHandler) mcp.MethodHandler { panic("constructor failed") }
+	b, _ := newTestBaton(t, Config{Middleware: []mcp.Middleware{panics}})
+	server := newVectorServer()
+	addLookup(server)
+	for i := range 2 {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("Wrap %d returned, so the server may serve without the vendor's middleware", i+1)
+				}
+			}()
+			b.Wrap(server)
+		}()
+	}
+}
+
 func TestAWrapWaitingOnOneThatPanicsWrapsTheServer(t *testing.T) {
 	b, sink := newTestBaton(t, Config{})
 	var attaches atomic.Int32

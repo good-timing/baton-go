@@ -10,8 +10,9 @@
   per `tools/list`; with `reports` off the report tool is left out of that
   caller's list and still accepts a report. `ReportMode` is `ReportOn` under
   console settings unless you set it. One `New` reads once for every server
-  it wraps. Each event carries `capture`, the settings' version and audience.
-  `SettingsConsole` with `Sink`, `VendorID` or `TenantID`, a `Settings` value
+  it wraps. Once settings are held, each event carries `capture`, the
+  settings' version and audience. `SettingsConsole` with no DSN, or with
+  `Sink`, `VendorID` or `TenantID`, a `Settings` value
   that is not allowed, and a `SettingsRefresh` under 15 seconds are config
   errors. The same document gives the same audience as in `baton-sdk`.
 - **Labels (experimental).** `Principal.Labels` and `Organization.Labels`

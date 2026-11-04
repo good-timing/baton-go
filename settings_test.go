@@ -165,6 +165,12 @@ func TestATinyShareMatchesNobody(t *testing.T) {
 	}
 }
 
+func TestAnyPositiveVersionIsRead(t *testing.T) {
+	if d := parseSettings(settingsBody(t, 3000000000, everyone)); d == nil || d.version != 3000000000 {
+		t.Error("a version past 2^31 was refused")
+	}
+}
+
 func TestTheMatchedAudienceSetsResultsAndIsRecorded(t *testing.T) {
 	d := parsed(t, settingsBody(t, 7, anAudience("beta", map[string]any{"label": []string{"beta"}}, "full"), everyone))
 	beta := d.settingsFor(matchView{labels: []string{"beta"}}, "srv")

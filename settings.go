@@ -141,7 +141,7 @@ func positiveInt(v any) (int, bool) {
 		return 0, false
 	}
 	i, err := n.Int64()
-	if err != nil || i < 1 || i > math.MaxInt32 {
+	if err != nil || i < 1 {
 		return 0, false
 	}
 	return int(i), true

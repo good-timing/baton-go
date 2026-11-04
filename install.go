@@ -216,6 +216,9 @@ func settle(impl *mcp.Implementation, opts *mcp.ServerOptions, cfg Config) (b *B
 		}
 	} else {
 		raw := cmp.Or(cfg.DSN, os.Getenv("BATON_DSN"))
+		if raw == "" && cfg.Settings == SettingsConsole {
+			return nil, nil, errors.New(`baton: Config.Settings "console" reads the Console's settings with the DSN's key, so it needs a DSN`)
+		}
 		if raw == "" {
 			slog.Warn("baton: no DSN (Config.DSN or BATON_DSN) and no Sink or VendorID, so Baton is not installed and records nothing")
 			return b, nil, nil
