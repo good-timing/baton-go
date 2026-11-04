@@ -1,6 +1,8 @@
 # baton-go
 
-**Pre-1.0.** The public API is not yet stable.
+**Stable from v1.0.0.** This module follows [semantic versioning](https://semver.org). A breaking change means a v2, with a `/v2` module path. The public API is every exported identifier in this package.
+
+baton-go v1.0 covers the MCP path only: a go-sdk `*mcp.Server`. The library API (SPEC §5.6) is not in 1.0; it will come later as an addition. The events Baton sends only grow: nothing is removed or changes meaning, except what SPEC marks experimental. See [SPEC §13, "Stability from 1.0"](https://github.com/good-timing/baton/blob/main/docs/SPEC.md#stability-from-10).
 
 MCP standardizes how agents discover and call your tools. It does not capture *why* a call happened or whether it helped the user. Baton instruments those interactions on the vendor side by wrapping your MCP server. It captures intent, the tool calls, expected outcomes and observed outcomes, plus friction signals, and sends each one to Baton.
 
@@ -58,7 +60,7 @@ func main() {
 
 Copy the DSN from **/account**. It packs four values: the collector to send to, your workspace, this server, and the key that binds them. The SDK unpacks them and sends to the collector itself. Tools added before and after `Install` are both captured.
 
-**Installing changes what your server advertises.** One sentence is added below your server's own instructions, and a `user_goal` parameter is added to every tool's schema and stripped again before your handler sees it. With `ReportMode: "on"`, an annotation tool named after your server (slugged, so a server called "Acme Knowledge Base" gets `acme-knowledge-base_annotate`) is also served, and the added text tells the agent when to report a problem with it. [What gets injected](https://goodtiming.ai/docs.html#injected-tools).
+**Installing changes what your server advertises.** One sentence is added below your server's own instructions, and a `user_goal` parameter is added to every tool's schema and stripped again before your handler sees it. With `ReportMode: baton.ReportOn`, an annotation tool named after your server (slugged, so a server called "Acme Knowledge Base" gets `acme-knowledge-base_annotate`) is also served, and the added text tells the agent when to report a problem with it. [What gets injected](https://goodtiming.ai/docs.html#injected-tools).
 
 **If you distribute your server, put the DSN in your source.** A stdio server runs on your user's machine, spawned by their MCP client, which passes it a fixed allowlist of environment variables (six names on macOS and Linux) plus whatever that user wrote in their own client config. Nothing from your `.env` is in either list. For a hosted server, set `BATON_DSN` and pass `baton.Config{}`. An explicit `DSN` wins over `BATON_DSN`.
 
@@ -137,8 +139,8 @@ Only what crosses the MCP call. The SDK never reads your logs, your database or 
 | Sent | What |
 |---|---|
 | Always | The tool's name, its arguments (`params`, scrubbed), `user_goal`, how long the call took, and on failure the `error_type`. The request's `_meta`, as `runtime_meta` (scrubbed, with any latitude and longitude rounded). What the client declares about itself, such as its name and version, and on HTTP its `User-Agent` and `X-Anthropic-Client` headers. Once per change: your server's name, version, capabilities and instructions, and each tool's name, description and schemas. Who the caller is and their company, only if you set `ResolvePrincipal`. For a prompt or a resource: its name and arguments (scrubbed), or its URI, how long the request took, and on failure the error's type and message. How many tools, prompts or resources a listing returned. Never a prompt's messages or a resource's contents. |
-| Only with `ResultCaptureMode: "full"` (the default) | What the tool returned (`result`), including any error text in it, and the message of an `error` your handler returned. |
-| With `ReportMode: "on"` | The reports the agent files, in its own words. |
+| Only with `ResultCaptureMode: baton.ResultCaptureFull` (the default) | What the tool returned (`result`), including any error text in it, and the message of an `error` your handler returned. |
+| With `ReportMode: baton.ReportOn` | The reports the agent files, in its own words. |
 | Never | Anything that did not cross the MCP call. |
 
 ## PII scrubbing
@@ -175,7 +177,7 @@ If your users belong to your customers' companies, return the company too, so yo
 
 ## Not capturing responses at all
 
-`ResultCaptureMode: "off"` and nothing **derived from what your tool returns** leaves your process: not the result, and not the error text, whether your handler returns it in the result or returns it as an `error`. Requests are unaffected: `params` are captured either way. Each affected event says so in its own field (`result_capture: "off"`).
+`ResultCaptureMode: baton.ResultCaptureOff` and nothing **derived from what your tool returns** leaves your process: not the result, and not the error text, whether your handler returns it in the result or returns it as an `error`. Requests are unaffected: `params` are captured either way. Each affected event says so in its own field (`result_capture: "off"`).
 
 **What is still sent:** the tool name, the duration, whether the call failed, and the `error_type`, which for a returned `error` is its Go type name, such as `*acme.NotFoundError`. So failure detection and timing keep working. Two messages are kept too: the message of a call to a tool that does not exist (when it is tagged `unknown_tool`, below), and a message you return as a `*baton.PublicError`, which marks it safe to send. The message of a failed listing, prompt or resource request is kept as well, and `Install` warns once about this when the mode is off. It can include text your handler returned, so return a message that names the resource, not its contents.
 
@@ -191,7 +193,7 @@ For a tool made with `mcp.AddTool`, go-sdk checks the arguments against the inpu
 handle, err := baton.Install(server, impl, opts, baton.Config{Middleware: []mcp.Middleware{auth}})
 ```
 
-Baton adds it inside its own middleware, so Baton sees every call, and a call that never got past your middleware is `refused`. Under `ResultCaptureMode: "off"` its message is withheld, unless it is a `*baton.PublicError`. A call your middleware lets through is recorded with the `ctx` it passes on, so `ResolvePrincipal` sees what your auth put there. Call `next` before your middleware returns, not in a goroutine it leaves running, and pass on that `ctx` (or one made from it) or the same request. A call your middleware sends on twice, as a retry does, is recorded once, from the first try. If your middleware changes both the `ctx` and the request, Baton loses track of the call: it is recorded without what your auth set, and a failure of your tool is sent as `refused`. Your middleware also checks calls to Baton's annotation tool. It does not see the tool listings Baton makes for itself. When `Install` adds nothing (`BATON_DISABLED`, no DSN, or an error), it still adds your middleware, so your auth always runs; do not add it again.
+Baton adds it inside its own middleware, so Baton sees every call, and a call that never got past your middleware is `refused`. Under `ResultCaptureMode: baton.ResultCaptureOff` its message is withheld, unless it is a `*baton.PublicError`. A call your middleware lets through is recorded with the `ctx` it passes on, so `ResolvePrincipal` sees what your auth put there. Call `next` before your middleware returns, not in a goroutine it leaves running, and pass on that `ctx` (or one made from it) or the same request. A call your middleware sends on twice, as a retry does, is recorded once, from the first try. If your middleware changes both the `ctx` and the request, Baton loses track of the call: it is recorded without what your auth set, and a failure of your tool is sent as `refused`. Your middleware also checks calls to Baton's annotation tool. It does not see the tool listings Baton makes for itself. When `Install` adds nothing (`BATON_DISABLED`, no DSN, or an error), it still adds your middleware, so your auth always runs; do not add it again.
 
 **Middleware you add yourself is not named.** Added with `AddReceivingMiddleware` before `Install`, a call it stops looks like your tool's own error. Added after `Install`, it runs before Baton, so a call it stops is not recorded at all.
 
@@ -205,9 +207,11 @@ The switch belongs to whoever RUNS the server: your user for a server you distri
 
 None of it blocks the quickstart above.
 
-- No library API: only a go-sdk `*mcp.Server` is wrapped.
-- Capture settings come from `Config` only; the Console's settings are not
-  read.
+- No library API (SPEC §5.6): only a go-sdk `*mcp.Server` is wrapped.
+- The Console's settings (experimental in SPEC §2.6) are not read. Capture
+  settings come from `Config` only.
+- The Console's setup has no recipe yet for a server built per request.
+  Follow [Servers built per request](#servers-built-per-request).
 
 ## Wire compatibility
 
