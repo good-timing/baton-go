@@ -2,7 +2,7 @@
 
 **Stable from v1.0.0.** This module follows [semantic versioning](https://semver.org). A breaking change means a v2, with a `/v2` module path. The public API is every exported identifier in this package, except these, which are **experimental** and may change in a minor release: `Config.Settings`, `Config.SettingsRefresh`, `SettingsMode` and its values, `Principal.Labels`, `Organization.Labels`, `Event.Labels`, `Event.Capture` and `CaptureObserved`.
 
-baton-go v1.0 covers the MCP path only ([what is not here yet](#what-is-not-here-yet)). The events Baton sends only grow: nothing is removed or changes meaning, except what SPEC marks experimental. See [SPEC §13, "Stability from 1.0"](https://github.com/good-timing/baton/blob/main/docs/SPEC.md#stability-from-10).
+baton-go v1.0 covers the MCP path only ([what is not here yet](#what-is-not-here-yet)). The events Baton sends only grow: nothing is removed or changes meaning, except what SPEC marks experimental. See [SPEC §13, "Stability from 1.0"](https://github.com/good-timing/baton-spec/blob/main/SPEC.md#stability-from-10).
 
 MCP standardizes how agents discover and call your tools. It does not capture *why* a call happened or whether it helped the user. Baton instruments those interactions on the vendor side by wrapping your MCP server. It captures intent, the tool calls, expected outcomes and observed outcomes, plus friction signals, and sends each one to Baton.
 
@@ -246,7 +246,7 @@ Events from this package must be JSON-identical in shape to the Python SDK's, so
 | | |
 |---|---|
 | [goodtiming.ai/docs.html](https://goodtiming.ai/docs.html) | The docs: configuration, what is captured, the Console |
-| [`docs/SPEC.md`](https://github.com/good-timing/baton/blob/main/docs/SPEC.md) | The wire protocol, in the `baton` repo. Applies here too |
-| [`docs/CHARTER.md`](https://github.com/good-timing/baton/blob/main/docs/CHARTER.md) | Why the SDK is thin. Read before architectural changes |
+| [`SPEC.md`](https://github.com/good-timing/baton-spec/blob/main/SPEC.md) | The wire protocol, in `baton-spec`. Applies here too |
+| [`baton`'s design rules](https://github.com/good-timing/baton/blob/main/AGENTS.md#design-rules) | Why the SDK is thin. Read before architectural changes |
 
 Apache-2.0.
