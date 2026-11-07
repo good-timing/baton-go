@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Faster on large text results.** A tool result whose content is only plain
+  text is copied into the event directly, instead of encoded to JSON and
+  decoded back. The event is the same. Other results take the old path.
+
 ## 1.0.0
 
 - **Stable from 1.0.** This module follows semver: a breaking change to the

@@ -639,7 +639,7 @@ func (b *installed) emitOutcome(cc callContext, toolName string, known, checksOu
 		if b.withholding(cc) {
 			end.ResultCapture = ptr("off")
 		} else if result != nil {
-			end.Result = b.scrubValue(jsonValue(result))
+			end.Result = b.scrubValue(resultValue(result))
 		}
 		b.emit(cc, "tool_call_end", end)
 		return
@@ -653,7 +653,7 @@ func (b *installed) emitOutcome(cc callContext, toolName string, known, checksOu
 	default:
 		failure.ErrorType = "tool_error"
 		failure.ErrorBody = b.errorBody(contentText(result.Content))
-		failure.Result = b.scrubValue(jsonValue(result))
+		failure.Result = b.scrubValue(resultValue(result))
 	}
 	if raised != nil {
 		failure.ErrorType = errorType(raised)
