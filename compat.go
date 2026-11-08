@@ -57,3 +57,23 @@ func goSDKRejectedOutput(err error) bool {
 	msg := err.Error()
 	return strings.HasPrefix(msg, "validating tool output: ") || strings.HasPrefix(msg, "marshaling output: ")
 }
+
+// textContentIsPlain holds while mcp.TextContent has the fields resultValue
+// copies and go-sdk encodes it as plainText does; otherwise every result
+// takes the slow path.
+var textContentIsPlain = func() bool {
+	type fields struct {
+		Text        string
+		Meta        mcp.Meta
+		Annotations *mcp.Annotations
+	}
+	if !reflect.TypeOf(mcp.TextContent{}).ConvertibleTo(reflect.TypeOf(fields{})) {
+		return false
+	}
+	for _, s := range []string{"", "a"} {
+		if !reflect.DeepEqual(jsonValue(&mcp.TextContent{Text: s}), any(plainText(s))) {
+			return false
+		}
+	}
+	return true
+}()

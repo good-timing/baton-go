@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
-	"reflect"
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -126,40 +125,30 @@ func resultValue(r *mcp.CallToolResult) any {
 	if r.Content == nil || !textContentIsPlain {
 		return jsonValue(r)
 	}
-	content := make([]any, 0, len(r.Content))
 	for _, c := range r.Content {
 		t, ok := c.(*mcp.TextContent)
 		// json.Marshal rewrites invalid UTF-8, one U+FFFD per bad byte.
 		if !ok || len(t.Meta) > 0 || t.Annotations != nil || !utf8.ValidString(t.Text) {
 			return jsonValue(r)
 		}
-		content = append(content, map[string]any{"type": "text", "text": t.Text})
 	}
 	rest := *r
 	rest.Content = nil
 	out, ok := jsonValue(&rest).(map[string]any)
 	if !ok {
-		return jsonValue(r)
+		return nil
+	}
+	content := make([]any, len(r.Content))
+	for i, c := range r.Content {
+		content[i] = plainText(c.(*mcp.TextContent).Text)
 	}
 	out["content"] = content
 	return out
 }
 
-// textContentIsPlain holds while mcp.TextContent has only the fields
-// resultValue copies; a go-sdk that adds one sends every result the slow way.
-var textContentIsPlain = func() bool {
-	t := reflect.TypeOf(mcp.TextContent{})
-	want := map[string]bool{"Text": true, "Meta": true, "Annotations": true}
-	if t.NumField() != len(want) {
-		return false
-	}
-	for i := range t.NumField() {
-		if !want[t.Field(i).Name] {
-			return false
-		}
-	}
-	return true
-}()
+func plainText(s string) map[string]any {
+	return map[string]any{"type": "text", "text": s}
+}
 
 func requiredNames(mode IntentParamMode) []string {
 	if mode == IntentParamRequired {

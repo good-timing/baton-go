@@ -27,14 +27,14 @@ func TestResultValueMatchesTheEncodedResult(t *testing.T) {
 		"image":            {Content: []mcp.Content{&mcp.ImageContent{Data: []byte{1, 2}, MIMEType: "image/png"}}},
 		"text then image":  {Content: []mcp.Content{text("a"), &mcp.ImageContent{Data: []byte{1}, MIMEType: "image/png"}}},
 	}
-	// go-sdk 1.7 added RequestState; set it where this go-sdk has it.
+	// Not every supported go-sdk has RequestState.
 	withState := &mcp.CallToolResult{Content: []mcp.Content{text("a")}}
-	if f := reflect.ValueOf(withState).Elem().FieldByName("RequestState"); f.IsValid() {
+	if f := structField(withState, "RequestState"); f.IsValid() {
 		f.SetString("opaque")
 		cases["request state"] = withState
 	}
 	if !textContentIsPlain {
-		t.Fatal("mcp.TextContent has a field resultValue does not copy")
+		t.Log("this go-sdk's TextContent takes the slow path")
 	}
 	for name, r := range cases {
 		t.Run(name, func(t *testing.T) {
