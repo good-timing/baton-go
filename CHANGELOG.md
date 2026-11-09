@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.1
 
 - **Console settings and labels are stable.** `Config.Settings`,
   `Config.SettingsRefresh`, `SettingsMode` and its values, `Principal.Labels`,
