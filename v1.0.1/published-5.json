@@ -1,0 +1,68 @@
+{
+  "max_rss_bytes": 21082112,
+  "measures": {
+    "burst": {
+      "call_p50_ms": 1.221438,
+      "call_p99_ms": 3.095117,
+      "close_ms": 2.229996,
+      "delivered": 20000,
+      "emitted": 20000,
+      "lost": 0,
+      "wall_ms": 1287.712582
+    },
+    "large_result": {
+      "added_p50_ms": 1.020116,
+      "added_p99_ms": 1.918991,
+      "baton_p50_ms": 1.955098,
+      "baton_p99_ms": 3.122083,
+      "delivered": 2200,
+      "emitted": 2200,
+      "heap_growth_bytes": 1172768,
+      "lost": 0,
+      "plain_p50_ms": 0.934982,
+      "plain_p99_ms": 1.203092
+    },
+    "memory": {
+      "growth_per_call_bytes": 0.424,
+      "heap_after_warmup_bytes": 980224,
+      "heap_at_end_bytes": 1061984,
+      "heap_at_half_bytes": 1057744
+    },
+    "memory_outage": {
+      "growth_per_call_bytes": 0.2688,
+      "heap_after_warmup_bytes": 1335456,
+      "heap_at_end_bytes": 2270464,
+      "heap_at_half_bytes": 2267776
+    },
+    "outage_down": {
+      "call_p50_ms": 1.001386,
+      "call_p99_ms": 2.513949,
+      "close_ms": 1202.656214,
+      "delivered": 0,
+      "emitted": 4000,
+      "lost": 4000,
+      "wall_ms": 209.402616
+    },
+    "outage_hang": {
+      "call_p50_ms": 1.01775,
+      "call_p99_ms": 2.165558,
+      "close_ms": 2900.394484,
+      "delivered": 0,
+      "emitted": 4000,
+      "lost": 4000,
+      "wall_ms": 207.274679
+    },
+    "overhead": {
+      "added_p50_ms": 0.032139,
+      "added_p99_ms": 0.176655,
+      "baton_p50_ms": 0.084568,
+      "baton_p99_ms": 0.479788,
+      "plain_p50_ms": 0.052429,
+      "plain_p99_ms": 0.303133
+    }
+  },
+  "runtime": "go1.25.0",
+  "sdk": "go",
+  "source": "published",
+  "version": "1.0.0"
+}
