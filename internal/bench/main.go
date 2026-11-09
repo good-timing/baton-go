@@ -3,11 +3,12 @@
 // the same program measures the last release and the checkout; bench.sh runs
 // both.
 //
-//	go run . -source published|checkout -out RESULT.json
+//	go run . -source published|checkout -out RESULT.json [-only MEASURE]
 package main
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
 	"flag"
@@ -320,9 +321,24 @@ func batonVersion() string {
 	return baton.Version
 }
 
+func cpuModel() string {
+	if runtime.GOOS == "darwin" {
+		raw, _ := exec.Command("sysctl", "-n", "machdep.cpu.brand_string").Output()
+		return cmp.Or(strings.TrimSpace(string(raw)), "unknown")
+	}
+	raw, _ := os.ReadFile("/proc/cpuinfo")
+	for line := range strings.Lines(string(raw)) {
+		if _, model, ok := strings.Cut(line, ":"); ok && strings.HasPrefix(line, "model name") {
+			return strings.TrimSpace(model)
+		}
+	}
+	return "unknown"
+}
+
 func main() {
 	source := flag.String("source", "", "published or checkout")
 	out := flag.String("out", "", "the result file")
+	only := flag.String("only", "", "run this measure alone")
 	flag.Parse()
 	if (*source != "published" && *source != "checkout") || *out == "" {
 		flag.Usage()
@@ -346,10 +362,16 @@ func main() {
 		if !ok {
 			fatal(fmt.Sprintf("bench.json has a measure this runner lacks: %s", m.Name))
 		}
+		if *only != "" && m.Name != *only {
+			continue
+		}
 		if strings.HasPrefix(m.Name, "memory") && peak == 0 {
 			peak = maxRSSBytes()
 		}
 		measures[m.Name] = run(ctx, m)
+	}
+	if *only != "" && len(measures) == 0 {
+		fatal(fmt.Sprintf("bench.json has no measure %s", *only))
 	}
 	if peak == 0 {
 		peak = maxRSSBytes()
@@ -359,6 +381,7 @@ func main() {
 		"version":       batonVersion(),
 		"source":        *source,
 		"runtime":       runtime.Version(),
+		"cpu":           cpuModel(),
 		"max_rss_bytes": peak,
 		"measures":      measures,
 	}, "", "  ")

@@ -1,0 +1,28 @@
+# bench.json's limits hold the 1.0 promise. Red on main: don't tag until it is green.
+name: Bench limit
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  limits:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: internal/bench
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: internal/bench/go.sum
+      - run: go build -o "$RUNNER_TEMP/bench" .
+      - run: python3 ../../baton-spec/scripts/check_bench_limit.py "$RUNNER_TEMP/bench" -source checkout -only '{measure}' -out '{out}'
