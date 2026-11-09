@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Console settings and labels are stable.** `Config.Settings`,
+  `Config.SettingsRefresh`, `SettingsMode` and its values, `Principal.Labels`,
+  `Organization.Labels`, `Event.Labels`, `Event.Capture` and
+  `CaptureObserved` now follow semver.
 - **Faster on large text results.** A tool result whose content is only plain
   text is copied into the event directly, instead of encoded to JSON and
   decoded back. The event is the same. Other results take the old path.

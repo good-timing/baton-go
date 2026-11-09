@@ -28,8 +28,6 @@ type Principal struct {
 	// scrubbed, so use group names or keys you keep, never raw ids. A
 	// Principal with Labels and no ID sends the labels alone. Sent with the
 	// Organization's Labels.
-	//
-	// Experimental: may change in a minor release.
 	Labels []string
 }
 
@@ -38,8 +36,6 @@ type Organization struct {
 	DisplayName string
 	Hashed      bool
 	// Labels are as Principal.Labels.
-	//
-	// Experimental: may change in a minor release.
 	Labels []string
 }
 

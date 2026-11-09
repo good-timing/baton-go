@@ -3,19 +3,18 @@ package baton
 // Event is one envelope (SPEC §11.4). Members with no value are sent as JSON
 // null, never left out, so the wire matches the other producers byte for byte.
 type Event struct {
-	EventID        string          `json:"event_id"`
-	TenantID       string          `json:"tenant_id"`
-	VendorID       string          `json:"vendor_id"`
-	SessionID      string          `json:"session_id"`
-	SequenceNumber int64           `json:"sequence_number"`
-	CapturedAt     string          `json:"captured_at"`
-	ConsentToken   string          `json:"consent_token"`
-	SDKVersion     string          `json:"sdk_version"`
-	AgentRuntime   string          `json:"agent_runtime"`
-	ClientObserved *ClientObserved `json:"client_observed"`
-	Principal      *Identity       `json:"principal"`
-	Organization   *Identity       `json:"organization"`
-	// Labels and Capture are experimental: they may change in a minor release.
+	EventID           string           `json:"event_id"`
+	TenantID          string           `json:"tenant_id"`
+	VendorID          string           `json:"vendor_id"`
+	SessionID         string           `json:"session_id"`
+	SequenceNumber    int64            `json:"sequence_number"`
+	CapturedAt        string           `json:"captured_at"`
+	ConsentToken      string           `json:"consent_token"`
+	SDKVersion        string           `json:"sdk_version"`
+	AgentRuntime      string           `json:"agent_runtime"`
+	ClientObserved    *ClientObserved  `json:"client_observed"`
+	Principal         *Identity        `json:"principal"`
+	Organization      *Identity        `json:"organization"`
 	Labels            []string         `json:"labels"`
 	Capture           *CaptureObserved `json:"capture"`
 	CallID            *string          `json:"call_id"`
@@ -36,7 +35,7 @@ type Identity struct {
 }
 
 // CaptureObserved is which Console settings a call ran under (SPEC §2.6,
-// §11.4). Experimental: may change in a minor release.
+// §11.4).
 type CaptureObserved struct {
 	SettingsVersion int    `json:"settings_version,omitempty"`
 	Audience        string `json:"audience,omitempty"`

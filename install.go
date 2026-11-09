@@ -69,8 +69,6 @@ const (
 )
 
 // SettingsMode is the type of Config.Settings. Empty means SettingsLocal.
-//
-// Experimental: may change in a minor release.
 type SettingsMode string
 
 const (
@@ -114,13 +112,9 @@ type Config struct {
 	// succeeds, and when nothing is saved, this Config's values apply. With
 	// it, ReportMode is ReportOn unless you set it, so the Console can turn
 	// reports off for some callers. SettingsLocal (default) never asks.
-	//
-	// Experimental: may change in a minor release.
 	Settings SettingsMode
 	// SettingsRefresh is how often SettingsConsole reads the settings: 60
 	// seconds when zero, and at least 15.
-	//
-	// Experimental: may change in a minor release.
 	SettingsRefresh time.Duration
 	// Middleware is the server's own receiving middleware, such as an auth
 	// check, added inside Baton's so a call it stops is named "refused".

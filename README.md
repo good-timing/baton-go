@@ -1,6 +1,6 @@
 # baton-go
 
-**Stable from v1.0.0.** This module follows [semantic versioning](https://semver.org). A breaking change means a v2, with a `/v2` module path. The public API is every exported identifier in this package, except these, which are **experimental** and may change in a minor release: `Config.Settings`, `Config.SettingsRefresh`, `SettingsMode` and its values, `Principal.Labels`, `Organization.Labels`, `Event.Labels`, `Event.Capture` and `CaptureObserved`.
+**Stable from v1.0.0.** This module follows [semantic versioning](https://semver.org). A breaking change means a v2, with a `/v2` module path. The public API is every exported identifier in this package.
 
 baton-go v1.0 covers the MCP path only ([what is not here yet](#what-is-not-here-yet)). The events Baton sends only grow: nothing is removed or changes meaning, except what SPEC marks experimental. See [SPEC §13, "Stability from 1.0"](https://github.com/good-timing/baton-spec/blob/main/SPEC.md#stability-from-10).
 
@@ -182,8 +182,6 @@ If your users belong to your customers' companies, return the company too. Each 
 **What is still sent:** the tool name, the duration, whether the call failed, and the `error_type`, which for a returned `error` is its Go type name, such as `*acme.NotFoundError`. So failure detection and timing keep working. Two messages are kept too: the message of a call to a tool that does not exist (when it is tagged `unknown_tool`, below), and a message you return as a `*baton.PublicError`, which marks it safe to send. The message of a failed listing, prompt or resource request is kept as well, and `Install` warns once about this when the mode is off. It can include text your handler returned, so return a message that names the resource, not its contents.
 
 ## Settings from the Console
-
-*Experimental: may change in a minor release.*
 
 `Settings: baton.SettingsConsole` reads the capture settings saved on the Console, so you can change them without a deploy, and they can differ by label, client or a share of your callers:
 
