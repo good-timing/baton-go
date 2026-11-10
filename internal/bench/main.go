@@ -219,6 +219,17 @@ func largeResult(ctx context.Context, m measure) map[string]float64 {
 	})
 }
 
+// onePass returns the call times, wall time and still-open install handle of one pass on a new server.
+func onePass(ctx context.Context, m measure, port int, call *mcp.CallToolParams) ([]float64, time.Duration, *baton.Handle) {
+	session, handle := echoClient(ctx, port, m.ResultBytes)
+	timedCalls(ctx, session, call, m.Warmup, 1)
+	started := time.Now()
+	times := timedCalls(ctx, session, call, m.Calls, m.Concurrency)
+	wall := time.Since(started)
+	_ = session.Close()
+	return times, wall, handle
+}
+
 // added runs m's calls on a server without Baton, then on one with it, and
 // returns the call times and what Baton adds to them.
 func added(ctx context.Context, m measure, port int, call *mcp.CallToolParams) map[string]float64 {
@@ -227,10 +238,7 @@ func added(ctx context.Context, m measure, port int, call *mcp.CallToolParams) m
 		name string
 		port int
 	}{{"plain", 0}, {"baton", port}} {
-		session, handle := echoClient(ctx, side.port, m.ResultBytes)
-		timedCalls(ctx, session, call, m.Warmup, 1)
-		times := timedCalls(ctx, session, call, m.Calls, m.Concurrency)
-		_ = session.Close()
+		times, _, handle := onePass(ctx, m, side.port, call)
 		handle.Close(ctx)
 		for _, p := range percentiles {
 			out[fmt.Sprintf("%s_p%d_ms", side.name, p)] = pct(times, float64(p))
@@ -244,20 +252,30 @@ func added(ctx context.Context, m measure, port int, call *mcp.CallToolParams) m
 
 func load(ctx context.Context, m measure) map[string]float64 {
 	return withCollector(m.Collector, func(port int) map[string]float64 {
-		session, handle := echoClient(ctx, port, 0)
-		timedCalls(ctx, session, echoCall, m.Warmup, 1)
+		// So that neither pass's times include collecting garbage made before it.
+		runtime.GC()
+		plain, plainWall, _ := onePass(ctx, m, 0, echoCall)
+		runtime.GC()
+		times, wall, handle := onePass(ctx, m, port, echoCall)
 		started := time.Now()
-		times := timedCalls(ctx, session, echoCall, m.Calls, m.Concurrency)
-		wall := time.Since(started)
-		_ = session.Close()
-		started = time.Now()
 		handle.Close(ctx)
 		closing := time.Since(started)
 		out := losses(port, m)
-		out["wall_ms"] = ms(wall)
-		out["call_p50_ms"] = pct(times, 50)
-		out["call_p99_ms"] = pct(times, 99)
 		out["close_ms"] = ms(closing)
+		for _, pass := range []struct {
+			prefix string
+			times  []float64
+			wall   time.Duration
+		}{{"plain_", plain, plainWall}, {"", times, wall}} {
+			out[pass.prefix+"wall_ms"] = ms(pass.wall)
+			for _, p := range percentiles {
+				out[fmt.Sprintf("%scall_p%d_ms", pass.prefix, p)] = pct(pass.times, float64(p))
+			}
+		}
+		for _, p := range percentiles {
+			key := fmt.Sprintf("call_p%d_ms", p)
+			out["added_"+key] = out[key] - out["plain_"+key]
+		}
 		return out
 	})
 }
