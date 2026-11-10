@@ -63,7 +63,7 @@ func withCollector(mode string, use func(port int) map[string]float64) map[strin
 	if mode == "down" {
 		return use(1)
 	}
-	cmd := exec.Command("python3", filepath.Join(spec, "collector", "fake_collector.py"), "--mode", mode)
+	cmd := exec.Command("python3", filepath.Join(spec, "collector", "fake_collector.py"), "--mode", mode, "--no-events")
 	cmd.Stderr = os.Stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
