@@ -445,8 +445,8 @@ func (cc callContext) matchView() matchView {
 	if cc.client != nil && cc.client.Info != nil {
 		v.client = cc.client.Info.Name
 	}
-	if id := cmp.Or(cc.who.principal, cc.who.org); id != nil {
-		v.shareKey = id.ID
+	if cc.who.principal != nil {
+		v.shareKey = cc.who.principal.ID
 	}
 	return v
 }

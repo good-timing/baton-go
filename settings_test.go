@@ -222,3 +222,12 @@ func TestReportsAreOnForSomeoneWhileAReachableAudienceHasThem(t *testing.T) {
 		}
 	}
 }
+
+func TestAShareSamplesThePrincipalAndNeverTheOrganization(t *testing.T) {
+	user, org := &Identity{ID: "user-1"}, &Identity{ID: "org_1"}
+	both := callContext{who: who{principal: user, org: org}}.matchView()
+	orgOnly := callContext{who: who{org: org}}.matchView()
+	if both.shareKey != "user-1" || orgOnly.shareKey != "" {
+		t.Fatalf("share keys: both=%q org only=%q", both.shareKey, orgOnly.shareKey)
+	}
+}
