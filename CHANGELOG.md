@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **A share samples principals only.** A caller whose `Principal` has no `ID` but has an `Organization` is no longer placed in a Console share by the organization's id. To target a company, give its `Organization` a label.
+- **A share samples principals only.** Only `Principal.ID` places a caller in a Console share. A caller whose `Principal.ID` is empty or blank is no longer placed by its `Organization.ID`. To target a company, give its `Organization` a label.
 
 ## 1.0.1
 
