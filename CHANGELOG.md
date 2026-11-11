@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.2
 
 - **A share samples principals only.** Only `Principal.ID` places a caller in a Console share. A caller whose `Principal.ID` is empty or blank is no longer placed by its `Organization.ID`. To target a company, give its `Organization` a label.
 
