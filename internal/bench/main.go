@@ -36,12 +36,13 @@ import (
 const key = "baton_pk_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 type measure struct {
-	Name        string `json:"name"`
-	Collector   string `json:"collector"`
-	Warmup      int    `json:"warmup"`
-	Calls       int    `json:"calls"`
-	Concurrency int    `json:"concurrency"`
-	ResultBytes int    `json:"result_bytes"`
+	Name        string            `json:"name"`
+	Collector   string            `json:"collector"`
+	Warmup      int               `json:"warmup"`
+	Calls       int               `json:"calls"`
+	Concurrency int               `json:"concurrency"`
+	ResultBytes int               `json:"result_bytes"`
+	Since       map[string]string `json:"since"`
 }
 
 var spec = filepath.Join("..", "..", "baton-spec")
@@ -329,6 +330,38 @@ func maxRSSBytes() int64 {
 	return usage.Maxrss * 1024
 }
 
+// runsHere reads "since" as compare_bench does, so the two never disagree on
+// what ran.
+func runsHere(m measure, source, version string) bool {
+	if m.Since == nil {
+		return true
+	}
+	from, ok := m.Since["go"]
+	if !ok {
+		return false
+	}
+	return source == "checkout" || !olderThan(version, from)
+}
+
+func olderThan(a, b string) bool {
+	x, y := releaseParts(a), releaseParts(b)
+	for i := range x {
+		if x[i] != y[i] {
+			return x[i] < y[i]
+		}
+	}
+	return false
+}
+
+func releaseParts(v string) [3]int {
+	var parts [3]int
+	core, _, _ := strings.Cut(strings.TrimPrefix(v, "v"), "-")
+	for i, p := range strings.SplitN(core, ".", 3) {
+		parts[i], _ = strconv.Atoi(p)
+	}
+	return parts
+}
+
 func batonVersion() string {
 	info, _ := debug.ReadBuildInfo()
 	for _, dep := range info.Deps {
@@ -373,9 +406,13 @@ func main() {
 		fatal(err)
 	}
 	ctx := context.Background()
+	version := batonVersion()
 	measures := map[string]map[string]float64{}
 	var peak int64
 	for _, m := range bench.Measures {
+		if !runsHere(m, *source, version) {
+			continue
+		}
 		run, ok := runners[m.Name]
 		if !ok {
 			fatal(fmt.Sprintf("bench.json has a measure this runner lacks: %s", m.Name))
@@ -396,7 +433,7 @@ func main() {
 	}
 	result, err := json.MarshalIndent(map[string]any{
 		"sdk":           "go",
-		"version":       batonVersion(),
+		"version":       version,
 		"source":        *source,
 		"runtime":       runtime.Version(),
 		"cpu":           cpuModel(),
