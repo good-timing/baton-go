@@ -15,6 +15,7 @@ const (
 	testWorkspace = "ten_655b084e118b43f88992ee6357fcc23c"
 	testKey       = "baton_pk_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	testTestKey   = "baton_tk_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	testOldKey    = "baton_ooooooooooooooooooooooooooooooooooooooooooo"
 	testDSN       = "https://" + testKey + "@ingest.goodtiming.ai/" + testWorkspace + "/echo-server"
 )
 
@@ -30,6 +31,12 @@ func TestParseDSN(t *testing.T) {
 }
 
 func TestParseDSNAccepts(t *testing.T) {
+	longestKeyLikeServer := ""
+	for n := range 60 {
+		if name := "baton_" + strings.Repeat("s", n); vendorIDPattern.MatchString(name) {
+			longestKeyLikeServer = name
+		}
+	}
 	for _, c := range []struct{ name, raw, origin string }{
 		{"trailing slash", testDSN + "/", "https://ingest.goodtiming.ai"},
 		{"http for local development", "http://" + testKey + "@localhost/" + testWorkspace + "/srv", "http://localhost"},
@@ -38,6 +45,8 @@ func TestParseDSNAccepts(t *testing.T) {
 		{"short workspace", "https://" + testKey + "@h.example.com/ten_0123abcd/srv", "https://h.example.com"},
 		{"spaces around it", "  " + testDSN + "  ", "https://ingest.goodtiming.ai"},
 		{"upper-case scheme", "HTTPS://" + testKey + "@h.example.com/" + testWorkspace + "/srv", "https://h.example.com"},
+		{"server named like a key", "https://" + testKey + "@h.example.com/" + testWorkspace + "/baton_onboarding", "https://h.example.com"},
+		{"longest server named like a key", "https://" + testKey + "@h.example.com/" + testWorkspace + "/" + longestKeyLikeServer, "https://h.example.com"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			got, err := parseDSN(c.raw)
@@ -87,7 +96,7 @@ func TestParseDSNRefuses(t *testing.T) {
 	} {
 		keys := []string{testKey}
 		if strings.Contains(c.raw, testKey) {
-			keys = append(keys, testTestKey)
+			keys = append(keys, testTestKey, testOldKey)
 		}
 		for _, key := range keys {
 			t.Run(c.name+" "+key[:8], func(t *testing.T) {
@@ -98,7 +107,7 @@ func TestParseDSNRefuses(t *testing.T) {
 				if !strings.Contains(err.Error(), c.says) {
 					t.Errorf("error %q does not say %q", err, c.says)
 				}
-				for _, run := range []string{"baton_pk_aaaa", "baton_sk_cccc", "baton_tk_eeee", key[len("baton_pk_"):]} {
+				for _, run := range []string{"baton_pk_aaaa", "baton_sk_cccc", "baton_tk_eeee", key[len(key)-43:]} {
 					if strings.Contains(err.Error(), run) {
 						t.Errorf("error repeats the key: %q", err)
 					}

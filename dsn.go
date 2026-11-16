@@ -18,8 +18,10 @@ import (
 var (
 	vendorIDPattern  = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,48}$`)
 	workspacePattern = regexp.MustCompile(`^ten_(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{32})$`)
-	keyRun           = regexp.MustCompile(`baton_(?:pk|sk|tk)_[A-Za-z0-9_%-]{8,}`)
-	notInAHost       = regexp.MustCompile(`[\\\s\p{Z}\p{Cc}]`)
+	// An older key has no type letters, so that branch needs a floor longer than
+	// any legal server name: a server called baton_<name> must not read as a key.
+	keyRun     = regexp.MustCompile(`baton_(?:(?:pk|sk|tk)_[A-Za-z0-9_%-]{8,}|[A-Za-z0-9_%-]{43,})`)
+	notInAHost = regexp.MustCompile(`[\\\s\p{Z}\p{Cc}]`)
 )
 
 const (
