@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **A test key (`baton_tk_`) is never repeated in an error.** A DSN with a
+  test key in the wrong place, or a bare test key, is refused with the key
+  replaced, as for `baton_pk_` and `baton_sk_` keys. A test key gets no
+  warning.
+
 ## 1.0.2
 
 - **A share samples principals only.** Only `Principal.ID` places a caller in a Console share. A caller whose `Principal.ID` is empty or blank is no longer placed by its `Organization.ID`. To target a company, give its `Organization` a label.

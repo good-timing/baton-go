@@ -14,6 +14,7 @@ import (
 const (
 	testWorkspace = "ten_655b084e118b43f88992ee6357fcc23c"
 	testKey       = "baton_pk_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testTestKey   = "baton_tk_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 	testDSN       = "https://" + testKey + "@ingest.goodtiming.ai/" + testWorkspace + "/echo-server"
 )
 
@@ -56,6 +57,7 @@ func TestParseDSNRefuses(t *testing.T) {
 		{"empty", "", "non-empty"},
 		{"a bare publishable key", testKey, "bare key"},
 		{"a bare secret key", "baton_sk_" + strings.Repeat("c", 43), "bare key"},
+		{"a bare test key", testTestKey, "bare key"},
 		{"no scheme", "ingest.goodtiming.ai/" + ws + "/srv", "https://"},
 		{"wrong scheme", "ftp://" + testKey + "@h.example.com/" + ws + "/srv", "https://"},
 		{"no key", "https://h.example.com/" + ws + "/srv", "carries no key"},
@@ -83,18 +85,26 @@ func TestParseDSNRefuses(t *testing.T) {
 		{"non-hex workspace", "https://" + testKey + "@h.example.com/ten_" + strings.Repeat("g", 8) + "/srv", "where the workspace belongs"},
 		{"49-character server", "https://" + testKey + "@h.example.com/" + ws + "/" + strings.Repeat("s", 49), "where the server belongs"},
 	} {
-		t.Run(c.name, func(t *testing.T) {
-			_, err := parseDSN(c.raw)
-			if err == nil {
-				t.Fatal("parsed")
-			}
-			if !strings.Contains(err.Error(), c.says) {
-				t.Errorf("error %q does not say %q", err, c.says)
-			}
-			if strings.Contains(err.Error(), "baton_pk_aaaa") || strings.Contains(err.Error(), "baton_sk_cccc") {
-				t.Errorf("error repeats the key: %q", err)
-			}
-		})
+		keys := []string{testKey}
+		if strings.Contains(c.raw, testKey) {
+			keys = append(keys, testTestKey)
+		}
+		for _, key := range keys {
+			t.Run(c.name+" "+key[:8], func(t *testing.T) {
+				_, err := parseDSN(strings.ReplaceAll(c.raw, testKey, key))
+				if err == nil {
+					t.Fatal("parsed")
+				}
+				if !strings.Contains(err.Error(), c.says) {
+					t.Errorf("error %q does not say %q", err, c.says)
+				}
+				for _, run := range []string{"baton_pk_aaaa", "baton_sk_cccc", "baton_tk_eeee", key[len("baton_pk_"):]} {
+					if strings.Contains(err.Error(), run) {
+						t.Errorf("error repeats the key: %q", err)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -148,9 +158,11 @@ func TestASecretKeyWarnsWithoutRepeatingIt(t *testing.T) {
 	if !strings.Contains(logs.String(), "SECRET") || strings.Contains(logs.String(), secret) {
 		t.Fatalf("logs: %s", logs)
 	}
-	logs.Reset()
-	if _, err := parseDSN(testDSN); err != nil || logs.Len() != 0 {
-		t.Fatalf("a publishable key: err %v, logs %s", err, logs)
+	for _, key := range []string{testKey, testTestKey} {
+		logs.Reset()
+		if _, err := parseDSN(strings.Replace(testDSN, testKey, key, 1)); err != nil || logs.Len() != 0 {
+			t.Fatalf("%s: err %v, logs %s", key[:8], err, logs)
+		}
 	}
 }
 

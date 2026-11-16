@@ -18,13 +18,14 @@ import (
 var (
 	vendorIDPattern  = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,48}$`)
 	workspacePattern = regexp.MustCompile(`^ten_(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{32})$`)
-	keyRun           = regexp.MustCompile(`baton_(?:pk|sk)_[A-Za-z0-9_%-]{8,}`)
+	keyRun           = regexp.MustCompile(`baton_(?:pk|sk|tk)_[A-Za-z0-9_%-]{8,}`)
 	notInAHost       = regexp.MustCompile(`[\\\s\p{Z}\p{Cc}]`)
 )
 
 const (
 	publishablePrefix = "baton_pk_"
 	secretPrefix      = "baton_sk_"
+	testKeyPrefix     = "baton_tk_"
 	bareKeyHint       = "this looks like a bare key, not a DSN — copy the full value from " +
 		"/account, which starts with https:// and ends with your server's name"
 )
@@ -78,8 +79,10 @@ func parseDSN(raw string) (dsn, error) {
 	if raw == "" {
 		return dsn{}, dsnError("the DSN must be a non-empty string")
 	}
-	if strings.HasPrefix(raw, publishablePrefix) || strings.HasPrefix(raw, secretPrefix) {
-		return dsn{}, dsnError("the DSN is not a URL: %s", bareKeyHint)
+	for _, prefix := range []string{publishablePrefix, secretPrefix, testKeyPrefix} {
+		if strings.HasPrefix(raw, prefix) {
+			return dsn{}, dsnError("the DSN is not a URL: %s", bareKeyHint)
+		}
 	}
 	safe := redactDSN(raw)
 	for _, c := range []struct{ char, name string }{{"\t", "tab"}, {"\r", "carriage return"}, {"\n", "line break"}} {
