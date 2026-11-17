@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.3
 
 - **A test key (`baton_tk_`) is never repeated in an error.** A DSN with a
   test key in the wrong place, or a bare test key, is refused with the key
