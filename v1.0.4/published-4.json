@@ -1,0 +1,84 @@
+{
+  "cpu": "INTEL(R) XEON(R) PLATINUM 8573C",
+  "max_rss_bytes": 21929984,
+  "measures": {
+    "burst": {
+      "added_call_p50_ms": 0.5332680000000001,
+      "added_call_p99_ms": 1.2717610000000001,
+      "call_p50_ms": 1.419334,
+      "call_p99_ms": 3.249385,
+      "close_ms": 1.828044,
+      "delivered": 20400,
+      "emitted": 20400,
+      "lost": 0,
+      "plain_call_p50_ms": 0.886066,
+      "plain_call_p99_ms": 1.977624,
+      "plain_wall_ms": 958.897891,
+      "wall_ms": 1466.599778
+    },
+    "large_result": {
+      "added_p50_ms": 0.4679860000000001,
+      "added_p99_ms": 0.9099919999999999,
+      "baton_p50_ms": 1.444233,
+      "baton_p99_ms": 2.191039,
+      "delivered": 2200,
+      "emitted": 2200,
+      "heap_growth_bytes": 626152,
+      "lost": 0,
+      "plain_p50_ms": 0.976247,
+      "plain_p99_ms": 1.281047
+    },
+    "memory": {
+      "growth_per_call_bytes": -3.04,
+      "heap_after_warmup_bytes": 1060056,
+      "heap_at_end_bytes": 1018568,
+      "heap_at_half_bytes": 1048968
+    },
+    "memory_outage": {
+      "growth_per_call_bytes": -0.3664,
+      "heap_after_warmup_bytes": 1328712,
+      "heap_at_end_bytes": 2256168,
+      "heap_at_half_bytes": 2259832
+    },
+    "outage_down": {
+      "added_call_p50_ms": 0.3431599999999999,
+      "added_call_p99_ms": 0.6609950000000002,
+      "call_p50_ms": 1.242017,
+      "call_p99_ms": 2.696108,
+      "close_ms": 702.830325,
+      "delivered": 0,
+      "emitted": 20400,
+      "lost": 20400,
+      "plain_call_p50_ms": 0.898857,
+      "plain_call_p99_ms": 2.035113,
+      "plain_wall_ms": 967.73508,
+      "wall_ms": 1241.929599
+    },
+    "outage_hang": {
+      "added_call_p50_ms": 0.3339040000000001,
+      "added_call_p99_ms": 0.6834189999999998,
+      "call_p50_ms": 1.231637,
+      "call_p99_ms": 2.609631,
+      "close_ms": 2901.164644,
+      "delivered": 0,
+      "emitted": 20400,
+      "lost": 20400,
+      "plain_call_p50_ms": 0.897733,
+      "plain_call_p99_ms": 1.926212,
+      "plain_wall_ms": 957.72463,
+      "wall_ms": 1199.788855
+    },
+    "overhead": {
+      "added_p50_ms": 0.022676,
+      "added_p99_ms": 0.171464,
+      "baton_p50_ms": 0.096836,
+      "baton_p99_ms": 0.550474,
+      "plain_p50_ms": 0.07416,
+      "plain_p99_ms": 0.37901
+    }
+  },
+  "runtime": "go1.25.0",
+  "sdk": "go",
+  "source": "published",
+  "version": "1.0.3"
+}
