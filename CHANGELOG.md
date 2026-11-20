@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.4
 
 - **The tool-list snapshot carries each tool's `outputSchema`**, as
   `tools/list` shows it, so the Console can show what a tool returns. A tool
