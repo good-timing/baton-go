@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **The tool-list snapshot carries each tool's `outputSchema`**, as
+  `tools/list` shows it, so the Console can show what a tool returns. A tool
+  without one has no `outputSchema` key. A server whose tools declare output
+  schemas gets one new snapshot version on upgrade.
+
 ## 1.0.3
 
 - **A test key (`baton_tk_`) is never repeated in an error.** A DSN with a

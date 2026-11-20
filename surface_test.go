@@ -226,3 +226,38 @@ func TestASnapshotWithoutCapabilitiesIsNeverSentAfterOneWithThem(t *testing.T) {
 	close(held.release)
 	<-stored
 }
+
+func TestASnapshotToolCarriesItsOutputSchemaOnlyWhenItHasOne(t *testing.T) {
+	plain := func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return &mcp.CallToolResult{}, nil
+	}
+	server, sink := installWithSink(t, Config{}, func(s *mcp.Server) {
+		addLookup(s)
+		s.AddTool(&mcp.Tool{Name: "plain", InputSchema: map[string]any{"type": "object"}}, plain)
+	})
+	cs := connect(t, server)
+	listed, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call(t, cs, "lookup", map[string]any{"name": "a"})
+	snaps := ofType(sink.all(), "surface_snapshot")
+	if len(snaps) == 0 {
+		t.Fatal("no snapshot")
+	}
+	tools := map[string]map[string]any{}
+	for _, tool := range snaps[0].Payload.(surfaceSnapshot).Tools {
+		tools[tool["name"].(string)] = tool
+	}
+	i := slices.IndexFunc(listed.Tools, func(tool *mcp.Tool) bool { return tool.Name == "lookup" })
+	if i < 0 {
+		t.Fatal("tools/list has no lookup")
+	}
+	want := jsonValue(listed.Tools[i].OutputSchema)
+	if want == nil || !reflect.DeepEqual(tools["lookup"]["outputSchema"], want) {
+		t.Errorf("lookup outputSchema = %v, want %v as tools/list shows it", tools["lookup"]["outputSchema"], want)
+	}
+	if _, ok := tools["plain"]["outputSchema"]; ok {
+		t.Errorf("plain has an outputSchema key: %v", tools["plain"])
+	}
+}

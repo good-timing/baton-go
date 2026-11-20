@@ -851,11 +851,15 @@ func (b *installed) sortedToolMaps(l listing) []map[string]any {
 	sorted := slices.SortedFunc(slices.Values(l), func(x, y *mcp.Tool) int { return strings.Compare(x.Name, y.Name) })
 	out := make([]map[string]any, 0, len(sorted))
 	for _, t := range sorted {
-		out = append(out, map[string]any{
+		tool := map[string]any{
 			"name":        t.Name,
 			"description": t.Description,
 			"inputSchema": b.schema(t),
-		})
+		}
+		if s, ok := jsonValue(t.OutputSchema).(map[string]any); ok {
+			tool["outputSchema"] = s
+		}
+		out = append(out, tool)
 	}
 	return out
 }
